@@ -32,3 +32,9 @@ export function getGraphPath(concept, userId, maxDepth = 3) {
         params.set("user_id", userId);
     return request(`/graph/path?${params.toString()}`);
 }
+export function explainConcept(payload) {
+    return request("/graph/explain", {
+        method: "POST",
+        body: JSON.stringify(payload)
+    });
+}

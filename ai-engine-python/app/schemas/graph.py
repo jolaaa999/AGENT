@@ -31,3 +31,13 @@ class ParseResponse(BaseModel):
     chunks: list[str]
     relations: list[GraphEdge]
     retries_used: int
+
+
+class ExplainRequest(BaseModel):
+    concept: str = Field(..., min_length=1, description="需要讲解的知识点")
+    markdown: str = Field(..., min_length=1, description="原始 Markdown 笔记")
+
+
+class ExplainResponse(BaseModel):
+    concept: str
+    explanation: str

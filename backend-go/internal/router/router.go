@@ -33,6 +33,7 @@ func New(cfg config.Config, graphController *controller.GraphController) *gin.En
 	r.POST("/upload-note", graphController.UploadNote)
 	r.GET("/graph/all", graphController.GetGraphAll)
 	r.GET("/graph/path", graphController.GetGraphPath)
+	r.POST("/graph/explain", graphController.ExplainConcept)
 
 	return r
 }

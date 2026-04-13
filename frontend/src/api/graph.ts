@@ -32,6 +32,17 @@ export interface PathResponse {
   paths: GraphResponse[];
 }
 
+export interface ExplainPayload {
+  concept: string;
+  markdown: string;
+  user_id?: string;
+}
+
+export interface ExplainResponse {
+  concept: string;
+  explanation: string;
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -70,4 +81,11 @@ export function getGraphPath(concept: string, userId?: string, maxDepth = 3) {
   });
   if (userId) params.set("user_id", userId);
   return request<PathResponse>(`/graph/path?${params.toString()}`);
+}
+
+export function explainConcept(payload: ExplainPayload) {
+  return request<ExplainResponse>("/graph/explain", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }

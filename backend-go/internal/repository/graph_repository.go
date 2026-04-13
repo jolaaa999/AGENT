@@ -68,9 +68,14 @@ func (r *graphRepository) UpsertGraph(ctx context.Context, userID string, data m
 				ON CREATE SET s.type = "Concept"
 				MERGE (t:Concept {user_id: $user_id, name: $target})
 				ON CREATE SET t.type = "Concept"
+				SET t.status = $status,
+				    t.reason = $reason,
+				    t.last_relation = $relation_desc,
+				    t.updated_at = $updated_at
 				MERGE (s)-[r:%s {user_id: $user_id}]->(t)
 				SET r.status = $status,
 				    r.reason = $reason,
+				    r.description = $relation_desc,
 				    r.updated_at = $updated_at
 				SET r += $extraProps
 			`, relType)
@@ -81,6 +86,7 @@ func (r *graphRepository) UpsertGraph(ctx context.Context, userID string, data m
 				"target":     rel.Target,
 				"status":     rel.Status,
 				"reason":     rel.Reason,
+				"relation_desc": fallback(rel.Description, rel.Type),
 				"extraProps": sanitizeProps(rel.Properties),
 				"updated_at": time.Now().UTC().Format(time.RFC3339),
 			}

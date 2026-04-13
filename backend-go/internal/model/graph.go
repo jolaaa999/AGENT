@@ -7,7 +7,20 @@ type UploadNoteRequest struct {
 
 type ParseRequest struct {
 	Markdown string `json:"markdown"`
-	UserID   string `json:"user_id"`
+}
+
+type ParseRelation struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	Relation string `json:"relation"`
+	Status   string `json:"status"`
+	Reason   string `json:"reason"`
+}
+
+type ParseResponse struct {
+	Chunks     []string        `json:"chunks"`
+	Relations  []ParseRelation `json:"relations"`
+	RetriesUse int             `json:"retries_used"`
 }
 
 type Entity struct {
@@ -19,12 +32,13 @@ type Entity struct {
 }
 
 type Relation struct {
-	Source     string                 `json:"source"`
-	Target     string                 `json:"target"`
-	Type       string                 `json:"type"`
-	Status     string                 `json:"status"`
-	Reason     string                 `json:"reason"`
-	Properties map[string]interface{} `json:"properties"`
+	Source      string                 `json:"source"`
+	Target      string                 `json:"target"`
+	Type        string                 `json:"type"`
+	Description string                 `json:"description"`
+	Status      string                 `json:"status"`
+	Reason      string                 `json:"reason"`
+	Properties  map[string]interface{} `json:"properties"`
 }
 
 type GraphData struct {
@@ -59,4 +73,15 @@ type G6GraphResponse struct {
 type PathResponse struct {
 	Concept string            `json:"concept"`
 	Paths   []G6GraphResponse `json:"paths"`
+}
+
+type ExplainRequest struct {
+	Concept  string `json:"concept" binding:"required"`
+	Markdown string `json:"markdown" binding:"required"`
+	UserID   string `json:"user_id"`
+}
+
+type ExplainResponse struct {
+	Concept     string `json:"concept"`
+	Explanation string `json:"explanation"`
 }

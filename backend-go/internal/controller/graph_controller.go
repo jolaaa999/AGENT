@@ -77,6 +77,22 @@ func (gc *GraphController) GetGraphPath(c *gin.Context) {
 	c.JSON(http.StatusOK, paths)
 }
 
+func (gc *GraphController) ExplainConcept(c *gin.Context) {
+	var req model.ExplainRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
+		return
+	}
+
+	userID := gc.resolveUserID(c, req.UserID)
+	result, err := gc.service.ExplainConcept(c.Request.Context(), req, userID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to explain concept", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func (gc *GraphController) resolveUserID(c *gin.Context, bodyUserID string) string {
 	if value := strings.TrimSpace(bodyUserID); value != "" {
 		return value

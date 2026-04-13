@@ -26,6 +26,18 @@ SYSTEM_PROMPT = """
 3) supplement：文本存在逻辑断层，需要基于通识先验补全缺失关系。
 """.strip()
 
+EXPLAIN_SYSTEM_PROMPT = """
+你是一名严谨的跨学科导师。请针对用户给出的知识点，结合原始笔记内容输出“可学习、可执行”的讲解。
+
+输出要求（纯文本）：
+1) 先给出该知识点的简明定义（2-3 句）
+2) 解释它与笔记中上下文的关系（指出关键前置知识）
+3) 给出一个直观例子或类比
+4) 给出 3 条下一步学习建议（可执行）
+
+风格要求：准确、结构清晰、避免空泛套话、不要输出 Markdown 代码块。
+""".strip()
+
 
 class DeepSeekParseError(Exception):
     """Raised when LLM output cannot be converted to valid graph edges."""
@@ -112,3 +124,31 @@ def parse_relations_with_retry(chunks: list[str], max_retries: int = 2) -> tuple
             continue
 
     raise DeepSeekParseError(f"failed to parse model output after retries: {last_error}")
+
+
+def explain_concept(concept: str, markdown: str) -> str:
+    if not settings.deepseek_api_key.strip():
+        raise DeepSeekParseError("DEEPSEEK_API_KEY is missing")
+
+    client = OpenAI(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+    )
+    user_prompt = f"目标知识点：{concept}\n\n原始笔记：\n{markdown}"
+
+    try:
+        completion = client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=[
+                {"role": "system", "content": EXPLAIN_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+    except Exception as exc:  # noqa: BLE001 - provider/network errors
+        raise DeepSeekParseError(f"deepseek explain request failed: {exc}") from exc
+
+    content = (completion.choices[0].message.content or "").strip()
+    if not content:
+        raise DeepSeekParseError("deepseek explain returned empty content")
+    return content

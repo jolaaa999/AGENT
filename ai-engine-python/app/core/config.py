@@ -13,5 +13,12 @@ class Settings:
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
+    def validate_or_raise(self) -> None:
+        if not self.deepseek_api_key.strip():
+            raise RuntimeError(
+                "Missing required env var DEEPSEEK_API_KEY. "
+                "Please create ai-engine-python/.env from .env.example and set it."
+            )
+
 
 settings = Settings()

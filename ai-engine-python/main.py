@@ -11,6 +11,11 @@ app = FastAPI(
 app.include_router(parse_router)
 
 
+@app.on_event("startup")
+def validate_config_on_startup() -> None:
+    settings.validate_or_raise()
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"service": "ai-engine-python", "status": "ok"}

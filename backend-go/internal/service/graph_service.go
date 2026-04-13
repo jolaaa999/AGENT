@@ -32,7 +32,7 @@ func NewGraphService(cfg config.Config, repo repository.GraphRepository) GraphSe
 		cfg:        cfg,
 		repository: repo,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: time.Duration(cfg.PythonTimeoutSec) * time.Second,
 		},
 	}
 }

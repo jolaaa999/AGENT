@@ -9,6 +9,7 @@ const maxDepth = ref(3);
 const isLoading = ref(false);
 const isNavigating = ref(false);
 const statusText = ref("图谱待生成");
+const importedFileName = ref("");
 const graphRoot = ref(null);
 let graph = null;
 let graphRawData = { nodes: [], edges: [] };
@@ -108,6 +109,36 @@ async function handleUpload() {
         isLoading.value = false;
     }
 }
+async function handleImportMarkdownFile(event) {
+    const input = event.target;
+    const file = input?.files?.[0];
+    if (!file)
+        return;
+    const isMarkdown = file.name.toLowerCase().endsWith(".md") || file.type === "text/markdown";
+    if (!isMarkdown) {
+        statusText.value = "仅支持导入 .md Markdown 文件";
+        input.value = "";
+        return;
+    }
+    // Prevent extremely large markdown from blocking UI.
+    const maxBytes = 2 * 1024 * 1024;
+    if (file.size > maxBytes) {
+        statusText.value = "Markdown 文件过大，请控制在 2MB 以内";
+        input.value = "";
+        return;
+    }
+    try {
+        markdown.value = await file.text();
+        importedFileName.value = file.name;
+        statusText.value = `已导入文件：${file.name}`;
+    }
+    catch (error) {
+        statusText.value = `读取文件失败：${error.message}`;
+    }
+    finally {
+        input.value = "";
+    }
+}
 async function handlePathNavigate() {
     if (!canNavigate.value)
         return;
@@ -171,6 +202,22 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)(
 __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
     ...{ class: "mb-2 block text-xs font-medium uppercase tracking-[0.12em] text-slate-400" },
 });
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "mb-3 flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+    ...{ class: "inline-flex cursor-pointer items-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    ...{ onChange: (__VLS_ctx.handleImportMarkdownFile) },
+    ...{ class: "hidden" },
+    type: "file",
+    accept: ".md,text/markdown",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+    ...{ class: "truncate text-xs text-slate-500" },
+});
+(__VLS_ctx.importedFileName || "未选择文件");
 __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea)({
     value: (__VLS_ctx.markdown),
     ...{ class: "h-72 w-full resize-none rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-sm leading-relaxed text-slate-700 outline-none transition focus:border-blue-400 focus:bg-white" },
@@ -290,6 +337,35 @@ if (__VLS_ctx.isLoading) {
 /** @type {__VLS_StyleScopedClasses['uppercase']} */ ;
 /** @type {__VLS_StyleScopedClasses['tracking-[0.12em]']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-slate-400']} */ ;
+/** @type {__VLS_StyleScopedClasses['mb-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['justify-between']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-50']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['inline-flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['cursor-pointer']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-lg']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-300']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-white']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-1.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-medium']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-700']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-slate-50']} */ ;
+/** @type {__VLS_StyleScopedClasses['hidden']} */ ;
+/** @type {__VLS_StyleScopedClasses['truncate']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-500']} */ ;
 /** @type {__VLS_StyleScopedClasses['h-72']} */ ;
 /** @type {__VLS_StyleScopedClasses['w-full']} */ ;
 /** @type {__VLS_StyleScopedClasses['resize-none']} */ ;
@@ -452,10 +528,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             isLoading: isLoading,
             isNavigating: isNavigating,
             statusText: statusText,
+            importedFileName: importedFileName,
             graphRoot: graphRoot,
             canGenerate: canGenerate,
             canNavigate: canNavigate,
             handleUpload: handleUpload,
+            handleImportMarkdownFile: handleImportMarkdownFile,
             handlePathNavigate: handlePathNavigate,
             resetFocus: resetFocus,
         };

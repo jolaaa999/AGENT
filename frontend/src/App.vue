@@ -11,6 +11,7 @@ const maxDepth = ref(3);
 const isLoading = ref(false);
 const isNavigating = ref(false);
 const statusText = ref("图谱待生成");
+const importedFileName = ref("");
 const graphRoot = ref<HTMLDivElement | null>(null);
 
 let graph: Graph | null = null;
@@ -116,6 +117,37 @@ async function handleUpload() {
   }
 }
 
+async function handleImportMarkdownFile(event: Event) {
+  const input = event.target as HTMLInputElement | null;
+  const file = input?.files?.[0];
+  if (!file) return;
+
+  const isMarkdown = file.name.toLowerCase().endsWith(".md") || file.type === "text/markdown";
+  if (!isMarkdown) {
+    statusText.value = "仅支持导入 .md Markdown 文件";
+    input.value = "";
+    return;
+  }
+
+  // Prevent extremely large markdown from blocking UI.
+  const maxBytes = 2 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    statusText.value = "Markdown 文件过大，请控制在 2MB 以内";
+    input.value = "";
+    return;
+  }
+
+  try {
+    markdown.value = await file.text();
+    importedFileName.value = file.name;
+    statusText.value = `已导入文件：${file.name}`;
+  } catch (error) {
+    statusText.value = `读取文件失败：${(error as Error).message}`;
+  } finally {
+    input.value = "";
+  }
+}
+
 async function handlePathNavigate() {
   if (!canNavigate.value) return;
   statusText.value = "正在计算逆向学习路径...";
@@ -171,6 +203,15 @@ onBeforeUnmount(() => {
         <label class="mb-2 block text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
           Markdown 笔记输入
         </label>
+        <div class="mb-3 flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+          <label class="inline-flex cursor-pointer items-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50">
+            导入 .md 文件
+            <input class="hidden" type="file" accept=".md,text/markdown" @change="handleImportMarkdownFile" />
+          </label>
+          <span class="truncate text-xs text-slate-500">
+            {{ importedFileName || "未选择文件" }}
+          </span>
+        </div>
         <textarea
           v-model="markdown"
           class="h-72 w-full resize-none rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-sm leading-relaxed text-slate-700 outline-none transition focus:border-blue-400 focus:bg-white"

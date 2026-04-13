@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any
 
 from openai import OpenAI
@@ -28,6 +29,9 @@ SYSTEM_PROMPT = """
 
 class DeepSeekParseError(Exception):
     """Raised when LLM output cannot be converted to valid graph edges."""
+
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_json_array(raw_text: str) -> list[dict[str, Any]]:
@@ -81,21 +85,29 @@ def parse_relations_with_retry(chunks: list[str], max_retries: int = 2) -> tuple
     user_prompt = _build_user_prompt(chunks)
 
     for attempt in range(total_attempts):
-        completion = client.chat.completions.create(
-            model=settings.deepseek_model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-        )
+        try:
+            completion = client.chat.completions.create(
+                model=settings.deepseek_model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+            )
+            content = completion.choices[0].message.content or ""
+            if not content.strip():
+                raise DeepSeekParseError("deepseek returned empty content")
+        except Exception as exc:  # noqa: BLE001 - SDK/network/provider errors need retries
+            logger.warning("deepseek request failed on attempt %s/%s: %s", attempt + 1, total_attempts, exc)
+            last_error = DeepSeekParseError(f"deepseek request failed: {exc}")
+            continue
 
-        content = completion.choices[0].message.content or ""
         try:
             raw_items = _extract_json_array(content)
             edges = _validate_edges(raw_items)
             return edges, attempt
         except Exception as exc:  # noqa: BLE001 - 需要兜底重试
+            logger.warning("deepseek parse failed on attempt %s/%s: %s", attempt + 1, total_attempts, exc)
             last_error = exc
             continue
 

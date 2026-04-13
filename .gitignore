@@ -1,3 +1,55 @@
+# =========================
+# 1. 通用配置 (OS & 编辑器配置 & 隐私)
+# =========================
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+!.env.example
+
+# =========================
+# 2. 前端视图层 (Vue3 + Node.js)
+# =========================
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# 3. 后端业务层 (Go)
+# =========================
+# 编译后的二进制执行文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+backend-go/bin/
+# Go 依赖包 (如果你用 vendor 模式)
+backend-go/vendor/
+
+# =========================
+# 4. AI 解析层 (Python)
+# =========================
+# 字节码文件
+__pycache__/
+*.py[cod]
+*$py.class
+# 虚拟环境 (极占空间，绝对不能上传)
+ai-engine-python/venv/
+ai-engine-python/env/
+ai-engine-python/.venv/
+# 本地 pytest 缓存
+.pytest_cache/
+
+# -------------------------------------------------------------------------------------------------------------
+
 # Logs
 logs
 *.log

@@ -44,6 +44,9 @@
    cd ai-engine-python
    pip install -r requirements.txt
    uvicorn main:app --reload --port 8000
+
+
+   cd d:/AGENT/ai-engine-python && .\venv\Scripts\Activate.ps1 && uvicorn main:app --reload --port 8000
    ```
 
 ## 技术栈
@@ -51,3 +54,7 @@
 - 前端：Vue3、TypeScript、Vite、TailwindCSS、AntV G6
 - 后端网关：Go、Gin、Neo4j Go Driver
 - AI 引擎：Python、FastAPI、Uvicorn、OpenAI SDK、Markdown-It-Py
+
+## 清空本地数据库
+# 进入 Neo4j 容器执行 cypher-shell
+docker exec -it agent-neo4j cypher-shell -u neo4j -p password "MATCH (n) DETACH DELETE n"

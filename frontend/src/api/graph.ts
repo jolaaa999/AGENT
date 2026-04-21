@@ -8,6 +8,7 @@ export interface GraphNode {
   label: string;
   type?: string;
   status?: "correct" | "error" | "supplement" | string;
+  //supplement 表示需要补充前置知识点
   reason?: string;
   data?: Record<string, unknown>;
 }
@@ -19,6 +20,7 @@ export interface GraphEdge {
   label: string;
   status?: "correct" | "error" | "supplement" | string;
   reason?: string;
+  confidence?: number;
   data?: Record<string, unknown>;
 }
 
@@ -81,6 +83,15 @@ export function getGraphPath(concept: string, userId?: string, maxDepth = 3) {
   });
   if (userId) params.set("user_id", userId);
   return request<PathResponse>(`/graph/path?${params.toString()}`);
+}
+
+export function getNodeNeighbors(nodeId: string, userId?: string, depth = 1) {
+  const params = new URLSearchParams({
+    node_id: nodeId,
+    depth: String(depth)
+  });
+  if (userId) params.set("user_id", userId);
+  return request<GraphResponse>(`/graph/neighbors?${params.toString()}`);
 }
 
 export function explainConcept(payload: ExplainPayload) {

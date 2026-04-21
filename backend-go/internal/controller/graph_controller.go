@@ -93,6 +93,33 @@ func (gc *GraphController) ExplainConcept(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+func (gc *GraphController) GetNodeNeighbors(c *gin.Context) {
+	nodeID := strings.TrimSpace(c.Query("node_id"))
+	if nodeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "node_id query param is required"})
+		return
+	}
+
+	depth := 1
+	if value := c.Query("depth"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "depth must be an integer"})
+			return
+		}
+		depth = parsed
+	}
+
+	userID := gc.resolveUserID(c, "")
+	result, err := gc.service.GetNodeNeighbors(c.Request.Context(), userID, nodeID, depth)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch node neighbors", "detail": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
 func (gc *GraphController) resolveUserID(c *gin.Context, bodyUserID string) string {
 	if value := strings.TrimSpace(bodyUserID); value != "" {
 		return value

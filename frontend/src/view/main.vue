@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import { Graph } from "@antv/g6";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { explainConcept, getGraphAll, getGraphPath, uploadNote, type GraphResponse } from "../api/graph";
-import { buildFocusSet, buildStyledGraph } from "../graph/g6-config";
+import { explainConcept, getGraphAll, getGraphPath, getNodeNeighbors, uploadNote, type GraphResponse } from "../api/graph";
+import {
+  buildFocusSet,
+  buildStyledGraph,
+  preprocessGraphData,
+  getLayoutConfig,
+  getNodeConfig,
+  getEdgeConfig,
+  getCollideLayoutConfig,
+  type LayoutType
+} from "../graph/g6-config";
 
 const markdown = ref("");
 const concept = ref("");
@@ -13,6 +22,7 @@ const isNavigating = ref(false);
 const statusText = ref("图谱待生成");
 const importedFileName = ref("");
 const graphRoot = ref<HTMLDivElement | null>(null);
+  // 绑定图谱容器，引用dom元素，可以获取容器大小高度↑
 const selectedNodeDetail = ref<{
   id: string;
   label: string;
@@ -23,6 +33,10 @@ const selectedNodeDetail = ref<{
   aiExplanation: string;
 } | null>(null);
 const isExplaining = ref(false);
+
+// LightRAG 渐进式展开模式状态 - 默认开启
+const isLightRAGMode = ref(true);
+const expandedNodes = ref<Set<string>>(new Set());
 
 let graph: Graph | null = null;
 let graphRawData: GraphResponse = { nodes: [], edges: [] };
@@ -158,6 +172,74 @@ async function showNodeDetail(nodeId: string) {
   }
 }
 
+/**
+ * LightRAG 模式：扇形径向展开节点邻居
+ * 点击核心节点时，邻居沿远离核心的方向均匀分布（圆周排列）
+ * 核心节点位置保持不变
+ */
+async function expandNodeNeighbors(nodeId: string) {
+  if (!graph) return;
+
+  statusText.value = `正在展开节点 "${nodeId}" 的邻居...`;
+  try {
+    const neighbors = await getNodeNeighbors(nodeId, userId.value.trim() || undefined, 1);
+
+    // 过滤出尚未显示的节点和边
+    const existingNodeIds = new Set(graphRawData.nodes.map((n) => n.id));
+    const existingEdgeIds = new Set(graphRawData.edges.map((e) => e.id));
+
+    const newNodes = neighbors.nodes.filter((n) => !existingNodeIds.has(n.id));
+    const newEdges = neighbors.edges.filter((e) => !existingEdgeIds.has(e.id));
+
+    if (newNodes.length === 0 && newEdges.length === 0) {
+      statusText.value = `节点 "${nodeId}" 没有更多邻居`;
+      expandedNodes.value.add(nodeId);
+      return;
+    }
+
+    // 获取核心节点的当前位置
+    const graphData = graph.getData();
+    const centerNode = graphData.nodes?.find((n: any) => n.id === nodeId);
+    if (!centerNode || centerNode.x === undefined || centerNode.y === undefined) {
+      console.error("[展开] 无法获取核心节点位置");
+      return;
+    }
+
+    const centerX = centerNode.x as number;
+    const centerY = centerNode.y as number;
+    const radius = 180; // 邻居节点分布的半径
+
+    // 为每个新节点计算扇形径向位置
+    const angleStep = (2 * Math.PI) / newNodes.length;
+    const positionedNodes = newNodes.map((node, index) => {
+      const angle = index * angleStep - Math.PI / 2; // 从顶部开始顺时针排列
+      return {
+        ...node,
+        x: centerX + radius * Math.cos(angle),
+        y: centerY + radius * Math.sin(angle)
+      };
+    });
+
+    // 更新本地数据
+    graphRawData.nodes.push(...positionedNodes);
+    graphRawData.edges.push(...newEdges);
+
+    // 标记节点已展开
+    expandedNodes.value.add(nodeId);
+
+    // 增量添加到图谱（带预计算位置）
+    const styled = buildStyledGraph({ nodes: positionedNodes, edges: newEdges });
+    graph.addData(styled as any);
+
+    // 使用 radial 布局或保持当前位置
+    await graph.render();
+
+    statusText.value = `已展开 ${newNodes.length} 个节点，${newEdges.length} 条边`;
+  } catch (error) {
+    statusText.value = `展开邻居失败：${(error as Error).message}`;
+  }
+}
+
 async function initGraph() {
   if (!graphRoot.value) return;
 
@@ -168,22 +250,11 @@ async function initGraph() {
     height,
     autoFit: "view",
     data: { nodes: [], edges: [] },
-    node: {
-      type: "circle",
-      style: {
-        size: 54
-      }
-    },
-    edge: {
-      type: "line"
-    },
-    layout: {
-      type: "force",
-      preventOverlap: true,
-      nodeSize: 58,
-      linkDistance: 140
-    },
+    node: getNodeConfig(),
+    edge: getEdgeConfig(),
+    layout: getLayoutConfig("force"),
     behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
+    //有节点报错或者supplement的时候，用户鼠标悬停显示提示框以及原因
     plugins: [
       {
         type: "tooltip",
@@ -197,41 +268,185 @@ async function initGraph() {
           tooltipHtml(String(event.target?.data?.reason ?? ""))
       }
     ]
+     //有节点报错或者supplement的时候，用户鼠标悬停显示提示框以及原因
   });
-
+  // 实际渲染函数
   await graph.render();
-
+  //graph.on 是 G6 图可视化引擎中的事件监听方法
+ // ↓ 点击节点显示节点详情或展开邻居（LightRAG 模式）
   graph.on("node:click", (event: any) => {
     const nodeId = resolveNodeIdFromEvent(event);
     if (!nodeId) return;
-    void showNodeDetail(nodeId);
-  });
 
+    // LightRAG 模式：点击节点展开邻居
+    if (isLightRAGMode.value && !expandedNodes.value.has(nodeId)) {
+      void expandNodeNeighbors(nodeId);
+    } else {
+      void showNodeDetail(nodeId);
+    }
+  });
+ // ↓ 显示节点详情，G6 不同版本的事件系统可能有差异，node:click 和 element:click 是两种事件格式，双重绑定确保兼容性。
   graph.on("element:click", (event: any) => {
     if (event?.targetType !== "node") return;
     const nodeId = resolveNodeIdFromEvent(event);
     if (!nodeId) return;
-    void showNodeDetail(nodeId);
+
+    // LightRAG 模式：点击节点展开邻居
+    if (isLightRAGMode.value && !expandedNodes.value.has(nodeId)) {
+      void expandNodeNeighbors(nodeId);
+    } else {
+      void showNodeDetail(nodeId);
+    }
   });
 
+  // ↓ 点击画布空白区域时，关闭节点详情面板
   graph.on("canvas:click", () => {
     selectedNodeDetail.value = null;
   });
 }
 
-async function renderGraph(data: GraphResponse, focusMode = false, pathData: GraphResponse[] = []) {
+async function renderGraph(
+  data: GraphResponse,
+  focusMode = false,
+  pathData: GraphResponse[] = [],
+  layoutType: LayoutType = "force"
+) {
   if (!graph) return;
+
+  console.log("[渲染] 开始渲染，节点数:", data.nodes.length, "边数:", data.edges.length);
 
   const focusSet = focusMode ? buildFocusSet(pathData) : undefined;
   const styled = buildStyledGraph(data, focusSet);
+
+  // 检查 styled 数据中是否有重复 ID
+  const styledIds = styled.nodes.map((n: any) => n.id);
+  const uniqueIds = new Set(styledIds);
+  if (styledIds.length !== uniqueIds.size) {
+    console.error("[渲染] 错误: styled 数据中有重复 ID");
+    const counts = new Map<string, number>();
+    styledIds.forEach((id: string) => counts.set(id, (counts.get(id) || 0) + 1));
+    const dups = Array.from(counts.entries()).filter(([_, c]) => c > 1);
+    console.error("[渲染] 重复 ID:", dups);
+  }
+
+  // 检查是否有节点带有预计算位置（扇形展开）
+  const hasPresetPositions = styled.nodes.some((n: any) => n.x !== undefined && n.y !== undefined);
+
+  if (hasPresetPositions) {
+    // 如果有预计算位置，使用 preset 布局保持位置
+    console.log("[渲染] 使用 preset 布局（保留预计算位置）");
+    graph.setLayout({
+      type: "preset",
+      padding: 50
+    });
+  } else {
+    // 根据模式切换布局
+    const layoutConfig = getLayoutConfig(layoutType);
+    console.log("[渲染] 使用布局:", layoutType);
+    graph.setLayout(layoutConfig);
+  }
+
   graph.setData(styled as any);
   await graph.render();
+
+  // 渲染后检查节点位置
+  const graphData = graph.getData();
+  console.log("[渲染] 渲染完成，实际节点数:", graphData.nodes?.length);
+
+  // 检查是否有节点位置重叠
+  if (graphData.nodes && graphData.nodes.length > 0) {
+    const positions = graphData.nodes.map((n: any) => ({ id: n.id, x: n.x, y: n.y }));
+    console.log("[渲染] 所有节点位置:", positions);
+
+    // 检查距离过近的节点对
+    const overlaps: Array<{ id1: string; id2: string; distance: number }> = [];
+    for (let i = 0; i < positions.length; i++) {
+      for (let j = i + 1; j < positions.length; j++) {
+        const p1 = positions[i];
+        const p2 = positions[j];
+        if (p1.x !== undefined && p1.y !== undefined && p2.x !== undefined && p2.y !== undefined) {
+          const dist = Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+          if (dist < 90) { // 节点直径约 70+padding，距离小于 90 算重叠
+            overlaps.push({ id1: p1.id, id2: p2.id, distance: dist });
+          }
+        } else {
+          console.warn("[渲染] 节点位置未定义:", p1.id, p1.x, p1.y, p2.id, p2.x, p2.y);
+        }
+      }
+    }
+    if (overlaps.length > 0) {
+      console.warn("[渲染] 发现距离过近的节点对 (可能重叠):", overlaps);
+    } else {
+      console.log("[渲染] 未发现重叠节点");
+    }
+  }
 }
 
 async function fetchAllGraph() {
-  graphRawData = await getGraphAll(userId.value.trim() || undefined);
+  console.log("[fetchAllGraph] 开始获取图谱数据...");
+  const rawData = await getGraphAll(userId.value.trim() || undefined);
+  console.log("[fetchAllGraph] 原始数据:", { nodes: rawData.nodes.length, edges: rawData.edges.length });
+
+  // 应用数据预处理：合并同义节点、过滤低质量边、降低噪声
+  graphRawData = preprocessGraphData(rawData.nodes, rawData.edges, {
+    minConfidence: 0.6,
+    removeSelfLoops: true,
+    keepIsolatedNodes: false
+  });
+  console.log("[fetchAllGraph] 预处理后:", { nodes: graphRawData.nodes.length, edges: graphRawData.edges.length });
+
+  // LightRAG 模式：只显示核心节点（连接数最多的前 N 个）
+  if (isLightRAGMode.value) {
+    console.log("[fetchAllGraph] LightRAG 模式：提取核心节点");
+    const coreNodes = extractCoreNodes(graphRawData, 5); // 默认显示 5 个核心节点
+    console.log("[fetchAllGraph] 核心节点:", { nodes: coreNodes.nodes.length, edges: coreNodes.edges.length });
+    console.log("[fetchAllGraph] 核心节点 IDs:", coreNodes.nodes.map((n) => n.id));
+    graphRawData = coreNodes;
+    expandedNodes.value.clear();
+  }
+
   await renderGraph(graphRawData);
-  statusText.value = `图谱已加载：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线`;
+  statusText.value = `图谱已加载：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线${isLightRAGMode.value ? " (渐进式展开模式)" : ""}`;
+}
+
+/**
+ * 提取核心节点（连接数最多的前 N 个）
+ * 用于 LightRAG 模式的初始展示
+ */
+function extractCoreNodes(data: GraphResponse, count: number): GraphResponse {
+  // 计算每个节点的连接数
+  const nodeDegree = new Map<string, number>();
+  data.nodes.forEach((node) => nodeDegree.set(node.id, 0));
+
+  data.edges.forEach((edge) => {
+    nodeDegree.set(edge.source, (nodeDegree.get(edge.source) || 0) + 1);
+    nodeDegree.set(edge.target, (nodeDegree.get(edge.target) || 0) + 1);
+  });
+
+  // 打印节点度数排序
+  const degreeEntries = Array.from(nodeDegree.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10);
+  console.log("[extractCoreNodes] 节点度数 TOP 10:", degreeEntries);
+
+  // 按连接数排序，取前 N 个
+  const sortedNodes = [...data.nodes]
+    .sort((a, b) => (nodeDegree.get(b.id) || 0) - (nodeDegree.get(a.id) || 0))
+    .slice(0, count);
+
+  const coreNodeIds = new Set(sortedNodes.map((n) => n.id));
+
+  // 过滤出核心节点之间的边
+  const coreEdges = data.edges.filter(
+    (e) => coreNodeIds.has(e.source) && coreNodeIds.has(e.target)
+  );
+
+  console.log("[extractCoreNodes] 核心节点间边数:", coreEdges.length);
+
+  return {
+    nodes: sortedNodes,
+    edges: coreEdges
+  };
 }
 
 async function handleUpload() {
@@ -288,7 +503,8 @@ async function handlePathNavigate() {
   statusText.value = "正在计算逆向学习路径...";
   try {
     const result = await getGraphPath(concept.value.trim(), userId.value.trim() || undefined, maxDepth.value);
-    await renderGraph(graphRawData, true, result.paths);
+    // 逆向导航使用 Dagre 层级布局，更适合展示学习路径的依赖关系
+    await renderGraph(graphRawData, true, result.paths, "dagre");
     isNavigating.value = true;
     statusText.value = `专注模式已开启：命中 ${result.paths.length} 条依赖路径`;
   } catch (error) {
@@ -297,7 +513,8 @@ async function handlePathNavigate() {
 }
 
 async function resetFocus() {
-  await renderGraph(graphRawData);
+  // 退出专注模式，恢复力导向布局
+  await renderGraph(graphRawData, false, [], "force");
   isNavigating.value = false;
   statusText.value = "已退出专注模式";
 }
@@ -402,6 +619,28 @@ onBeforeUnmount(() => {
             >
               退出专注模式
             </button>
+          </div>
+        </div>
+
+        <div class="mt-6 border-t border-slate-200 pt-5">
+          <label class="mb-2 block text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
+            视图模式
+          </label>
+          <div class="flex items-center gap-3">
+            <button
+              :class="[
+                'rounded-xl px-4 py-2.5 text-sm font-medium transition',
+                isLightRAGMode
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  : 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+              ]"
+              @click="isLightRAGMode = !isLightRAGMode; fetchAllGraph()"
+            >
+              {{ isLightRAGMode ? '渐进式展开：开' : '渐进式展开：关' }}
+            </button>
+            <span class="text-xs text-slate-500">
+              {{ isLightRAGMode ? '点击节点展开邻居' : '显示完整图谱' }}
+            </span>
           </div>
         </div>
       </section>

@@ -16,6 +16,7 @@ type GraphRepository interface {
 	UpsertGraph(ctx context.Context, userID string, data model.GraphData) error
 	GetGraphAll(ctx context.Context, userID string) (model.G6GraphResponse, error)
 	GetPathsToConcept(ctx context.Context, userID, concept string, maxDepth int) (model.PathResponse, error)
+	GetNodeNeighbors(ctx context.Context, userID string, nodeID string, depth int) (model.G6GraphResponse, error)
 }
 
 type graphRepository struct {
@@ -81,14 +82,14 @@ func (r *graphRepository) UpsertGraph(ctx context.Context, userID string, data m
 			`, relType)
 
 			params := map[string]interface{}{
-				"user_id":    userID,
-				"source":     rel.Source,
-				"target":     rel.Target,
-				"status":     rel.Status,
-				"reason":     rel.Reason,
+				"user_id":       userID,
+				"source":        rel.Source,
+				"target":        rel.Target,
+				"status":        rel.Status,
+				"reason":        rel.Reason,
 				"relation_desc": fallback(rel.Description, rel.Type),
-				"extraProps": sanitizeProps(rel.Properties),
-				"updated_at": time.Now().UTC().Format(time.RFC3339),
+				"extraProps":    sanitizeProps(rel.Properties),
+				"updated_at":    time.Now().UTC().Format(time.RFC3339),
 			}
 			if _, err := tx.Run(ctx, query, params); err != nil {
 				return nil, err
@@ -216,6 +217,131 @@ func (r *graphRepository) GetPathsToConcept(ctx context.Context, userID, concept
 		Concept: concept,
 		Paths:   pathGraphs,
 	}, nil
+}
+
+func (r *graphRepository) GetNodeNeighbors(ctx context.Context, userID string, nodeID string, depth int) (model.G6GraphResponse, error) {
+	if depth < 1 {
+		depth = 1
+	}
+	if depth > 3 {
+		depth = 3
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	nodes := make([]model.G6Node, 0)
+	edges := make([]model.G6Edge, 0)
+	nodeSeen := make(map[string]struct{})
+
+	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		// 获取中心节点
+		centerResult, err := tx.Run(ctx, `
+			MATCH (n:Concept {user_id: $user_id, name: $node_id})
+			RETURN n
+		`, map[string]interface{}{"user_id": userID, "node_id": nodeID})
+		if err != nil {
+			return nil, err
+		}
+		if centerResult.Next(ctx) {
+			record := centerResult.Record()
+			nodeValue, _ := record.Get("n")
+			node, ok := nodeValue.(neo4j.Node)
+			if ok {
+				props := node.Props
+				name := asString(props["name"])
+				nodes = append(nodes, model.G6Node{
+					ID:     name,
+					Label:  name,
+					Type:   asString(props["type"]),
+					Status: asString(props["status"]),
+					Reason: asString(props["reason"]),
+					Data:   props,
+				})
+				nodeSeen[name] = struct{}{}
+			}
+		}
+
+		// 获取邻居节点和边（双向）
+		query := fmt.Sprintf(`
+			MATCH (center:Concept {user_id: $user_id, name: $node_id})-[r*1..%d]-(neighbor:Concept {user_id: $user_id})
+			RETURN center, neighbor, r as relations
+		`, depth)
+
+		neighborResult, err := tx.Run(ctx, query, map[string]interface{}{
+			"user_id": userID,
+			"node_id": nodeID,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for neighborResult.Next(ctx) {
+			record := neighborResult.Record()
+
+			// 处理邻居节点
+			neighborVal, _ := record.Get("neighbor")
+			if neighborNode, ok := neighborVal.(neo4j.Node); ok {
+				props := neighborNode.Props
+				name := asString(props["name"])
+				if _, exists := nodeSeen[name]; !exists {
+					nodes = append(nodes, model.G6Node{
+						ID:     name,
+						Label:  name,
+						Type:   asString(props["type"]),
+						Status: asString(props["status"]),
+						Reason: asString(props["reason"]),
+						Data:   props,
+					})
+					nodeSeen[name] = struct{}{}
+				}
+			}
+
+			// 处理关系
+			relationsVal, _ := record.Get("relations")
+			if rels, ok := relationsVal.([]interface{}); ok {
+				for _, relVal := range rels {
+					if rel, ok := relVal.(neo4j.Relationship); ok {
+						// 获取关系的起始和目标节点
+						startResult, _ := tx.Run(ctx, `
+							MATCH (n:Concept {user_id: $user_id}) WHERE id(n) = $start_id
+							RETURN n.name as name
+						`, map[string]interface{}{"user_id": userID, "start_id": rel.StartId})
+						endResult, _ := tx.Run(ctx, `
+							MATCH (n:Concept {user_id: $user_id}) WHERE id(n) = $end_id
+							RETURN n.name as name
+						`, map[string]interface{}{"user_id": userID, "end_id": rel.EndId})
+
+						var source, target string
+						if startResult.Next(ctx) {
+							source = asString(startResult.Record().Values[0])
+						}
+						if endResult.Next(ctx) {
+							target = asString(endResult.Record().Values[0])
+						}
+
+						if source != "" && target != "" {
+							edges = append(edges, model.G6Edge{
+								ID:     fmt.Sprintf("%s-%s-%s", source, rel.Type, target),
+								Source: source,
+								Target: target,
+								Label:  rel.Type,
+								Status: asString(rel.Props["status"]),
+								Reason: asString(rel.Props["reason"]),
+								Data:   rel.Props,
+							})
+						}
+					}
+				}
+			}
+		}
+		return nil, neighborResult.Err()
+	})
+	if err != nil {
+		return model.G6GraphResponse{}, err
+	}
+
+	return model.G6GraphResponse{Nodes: nodes, Edges: edges}, nil
 }
 
 func convertPathToG6(path neo4j.Path) model.G6GraphResponse {

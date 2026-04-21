@@ -47,7 +47,8 @@ ai-engine-python/env/
 ai-engine-python/.venv/
 # 本地 pytest 缓存
 .pytest_cache/
-
+# 临时安装脚本
+ai-engine-python/get-pip.py
 # -------------------------------------------------------------------------------------------------------------
 
 # Logs

@@ -20,6 +20,7 @@ type GraphService interface {
 	GetGraphAll(ctx context.Context, userID string) (model.G6GraphResponse, error)
 	GetGraphPath(ctx context.Context, userID, concept string, maxDepth int) (model.PathResponse, error)
 	ExplainConcept(ctx context.Context, req model.ExplainRequest, userID string) (model.ExplainResponse, error)
+	GetNodeNeighbors(ctx context.Context, userID string, nodeID string, depth int) (model.G6GraphResponse, error)
 }
 
 type graphService struct {
@@ -98,6 +99,10 @@ func (s *graphService) GetGraphAll(ctx context.Context, userID string) (model.G6
 
 func (s *graphService) GetGraphPath(ctx context.Context, userID, concept string, maxDepth int) (model.PathResponse, error) {
 	return s.repository.GetPathsToConcept(ctx, userID, concept, maxDepth)
+}
+
+func (s *graphService) GetNodeNeighbors(ctx context.Context, userID string, nodeID string, depth int) (model.G6GraphResponse, error) {
+	return s.repository.GetNodeNeighbors(ctx, userID, nodeID, depth)
 }
 
 func (s *graphService) ExplainConcept(ctx context.Context, req model.ExplainRequest, userID string) (model.ExplainResponse, error) {

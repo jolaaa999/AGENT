@@ -1,14 +1,16 @@
 from fastapi import FastAPI
 
 from app.api.parse import router as parse_router
+from app.langchain_agent import langchain_router
 from app.core.config import settings
 
 app = FastAPI(
     title="AI Engine Python",
-    description="基于 Markdown AST 和 DeepSeek 的图谱关系解析引擎",
-    version="0.2.0",
+    description="基于 Markdown AST + LangChain Agent + DeepSeek 的图谱关系解析引擎",
+    version="0.3.0",
 )
 app.include_router(parse_router)
+app.include_router(langchain_router)
 
 
 @app.on_event("startup")

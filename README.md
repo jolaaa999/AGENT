@@ -7,8 +7,8 @@
 ```text
 .
 ├── frontend/             # Vue3 + TypeScript + Vite + TailwindCSS + AntV G6
-├── backend-go/           # Go + Gin + Neo4j Driver
-├── ai-engine-python/     # FastAPI + DeepSeek(OpenAI SDK) 解析引擎
+├── backend-go/           # Go + Gin + Neo4j Driver (DDD 分层)
+├── ai-engine-python/     # FastAPI + LangChain Agent + DeepSeek 解析引擎
 ├── docker-compose.yml    # 一键启动 Neo4j
 └── README.md
 ```
@@ -38,22 +38,28 @@
    go run .
    ```
 
-4. 启动 AI 引擎（Python）：
+4. 启动 AI 引擎（Python + LangChain Agent）：
 
    ```bash
    cd ai-engine-python
    pip install -r requirements.txt
    uvicorn main:app --reload --port 8000
-
-
-   cd d:/AGENT/ai-engine-python && .\venv\Scripts\Activate.ps1 && uvicorn main:app --reload --port 8000
    ```
+
+   启动后可访问：
+   - `GET  /health` — 服务健康检查
+   - `GET  /api/langchain/health` — LangChain 模块状态
+   - `POST /api/parse` — 原始 DeepSeek 解析（OpenAI SDK）
+   - `POST /api/langchain/diagnose` — LangChain 三 Agent 诊断流水线
+   - `POST /api/langchain/chat` — AI 对话（基于图谱上下文）
+   - `POST /api/langchain/learning-path` — 个性化学习路径指导
 
 ## 技术栈
 
 - 前端：Vue3、TypeScript、Vite、TailwindCSS、AntV G6
 - 后端网关：Go、Gin、Neo4j Go Driver
-- AI 引擎：Python、FastAPI、Uvicorn、OpenAI SDK、Markdown-It-Py
+- AI 引擎：Python、FastAPI、Uvicorn、LangChain (Agent框架)、LangChain-OpenAI、OpenAI SDK、Markdown-It-Py
+- 数据库：Neo4j（Docker 部署）
 
 ## 清空本地数据库
 # 进入 Neo4j 容器执行 cypher-shell

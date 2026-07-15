@@ -22,6 +22,7 @@ func New(cfg config.Config, graphController *controller.GraphController) *gin.En
 		MaxAge:           12 * time.Hour,
 	}))
 
+	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"service": "backend-go",
@@ -30,11 +31,24 @@ func New(cfg config.Config, graphController *controller.GraphController) *gin.En
 		})
 	})
 
+	// 图谱核心
 	r.POST("/upload-note", graphController.UploadNote)
+	r.POST("/upload-note-langchain", graphController.UploadNoteLangChain)
 	r.GET("/graph/all", graphController.GetGraphAll)
 	r.GET("/graph/path", graphController.GetGraphPath)
 	r.GET("/graph/neighbors", graphController.GetNodeNeighbors)
 	r.POST("/graph/explain", graphController.ExplainConcept)
+
+	// AI 对话
+	r.POST("/graph/chat", graphController.ChatWithContext)
+	r.POST("/graph/learning-path", graphController.LearningPath)
+
+	// 文件管理
+	r.GET("/files", graphController.ListUserFiles)
+	r.POST("/files/create", graphController.CreateFile)
+	r.POST("/files/group/create", graphController.CreateFileGroup)
+	r.DELETE("/files/delete", graphController.DeleteFile)
+	r.DELETE("/files/group/delete", graphController.DeleteFileGroup)
 
 	return r
 }

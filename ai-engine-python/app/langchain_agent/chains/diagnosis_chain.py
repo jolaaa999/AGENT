@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DiagnosisResult:
     """诊断流水线的完整结果"""
-    success: bool
+    success: bool = False
     output: DiagnosisOutput = field(default_factory=lambda: DiagnosisOutput(nodes=[], edges=[]))
     error_message: str = ""
     retries_used: int = 0

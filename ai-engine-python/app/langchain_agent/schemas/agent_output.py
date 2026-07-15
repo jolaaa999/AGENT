@@ -56,7 +56,7 @@ class ExtractedRelation(BaseModel):
 
 class NEROutput(BaseModel):
     """NER Agent 的标准化输出"""
-    entities: list[ExtractedEntity] = Field(..., min_length=1, description="抽取的实体列表")
+    entities: list[ExtractedEntity] = Field(default_factory=list, description="抽取的实体列表（可能为空）")
     relations: list[ExtractedRelation] = Field(default_factory=list, description="实体间关系列表")
 
 
@@ -159,7 +159,8 @@ class DiagnosisOutput(BaseModel):
 
     这个 Schema 是三个 Agent 输出合并后的结果，
     直接对应 Go 后端的入库 JSON 格式。
+    若所有 Agent 均未能抽取到有效数据，nodes/edges 可为空列表。
     """
-    nodes: list[DiagnosisNode] = Field(..., min_length=1)
+    nodes: list[DiagnosisNode] = Field(default_factory=list)
     edges: list[DiagnosisEdge] = Field(default_factory=list)
     summary: str = Field(default="", description="本次诊断的汇总说明")

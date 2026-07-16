@@ -16,6 +16,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from app.langchain_agent.chains import get_diagnosis_chain, DiagnosisResult
+from app.langchain_agent.agents.react_chat_agent import get_react_chat_agent
 from app.langchain_agent.prompts import get_chat_prompt, get_learning_path_prompt
 from app.langchain_agent.tools import format_graph_context, format_dependency_tree
 from app.langchain_agent.schemas import DiagnosisOutput
@@ -65,24 +66,18 @@ class DiagnoseResponse(BaseModel):
 class ChatRequest(BaseModel):
     """AI 对话请求"""
     user_message: str = Field(..., min_length=1, description="用户输入的消息")
-    graph_nodes: str = Field(
-        default="[]",
-        description="当前文件的图谱节点 JSON（可选，不传则无图谱上下文）"
-    )
-    graph_edges: str = Field(
-        default="[]",
-        description="当前文件的图谱边 JSON（可选）"
-    )
-    conversation_history: str = Field(
-        default="",
-        description="历史对话记录（可选，JSON 格式）"
-    )
+    conversation_id: str = Field(default="", description="对话会话 ID")
+    markdown: str = Field(default="", description="当前 Markdown 笔记全文")
+    graph_nodes: str = Field(default="[]", description="图谱节点 JSON")
+    graph_edges: str = Field(default="[]", description="图谱边 JSON")
+    image_base64: str = Field(default="", description="图片 Base64 编码（可选，支持多模态）")
 
 
 class ChatResponse(BaseModel):
     """AI 对话响应"""
     reply: str = Field(..., description="Agent 的回复内容")
     conversation_id: str = Field(default="", description="对话会话 ID")
+    edited_markdown: str = Field(default="", description="Agent 修改后的 Markdown（若有修改）")
 
 
 class LearningPathRequest(BaseModel):
@@ -173,40 +168,44 @@ def diagnose(payload: DiagnoseRequest) -> DiagnoseResponse:
 @router.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     """
-    AI 对话端点（右侧面板对话功能）
+    AI 对话端点（ReAct Agent 版）
 
-    接收用户消息 + 当前图谱上下文（节点+边），
-    基于 LangChain ChatPromptTemplate 生成学术对话回复。
+    使用 LangChain ReAct Agent，具备：
+    - 读取/编辑 Markdown 文档
+    - 搜索知识图谱
+    - 图像识别（多模态）
 
-    每个用户/文件/文件组的对话有唯一 ID，历史记录由 Go 层管理。
+    Agent 会自主决策何时调用工具来完成任务。
     """
-    # 格式化图谱上下文
-    graph_context = format_graph_context(
-        nodes_json=payload.graph_nodes,
-        edges_json=payload.graph_edges,
-    )
+    if not payload.conversation_id:
+        payload.conversation_id = "default"
 
-    # 组装对话 Prompt
-    chat_prompt = get_chat_prompt()
-    llm = _build_chat_llm()
+    # 解析图谱数据
+    try:
+        graph_nodes = json.loads(payload.graph_nodes) if payload.graph_nodes else []
+        graph_edges = json.loads(payload.graph_edges) if payload.graph_edges else []
+    except json.JSONDecodeError:
+        graph_nodes, graph_edges = [], []
 
-    # 构建消息（若有历史记录，注入上下文）
-    messages = chat_prompt.format_messages(
-        graph_context=graph_context,
-        user_message=payload.user_message,
-    )
+    agent = get_react_chat_agent()
 
     try:
-        response = llm.invoke(messages)
-        reply = response.content if hasattr(response, 'content') else str(response)
-        reply = reply.strip() if reply else "抱歉，我暂时无法回答这个问题，请稍后再试。"
+        result = agent.chat(
+            user_message=payload.user_message,
+            conversation_id=payload.conversation_id,
+            markdown=payload.markdown,
+            graph_nodes=graph_nodes,
+            graph_edges=graph_edges,
+            image_base64=payload.image_base64,
+        )
     except Exception as exc:
-        logger.exception("[LangChain Router] 对话调用失败")
-        raise HTTPException(status_code=502, detail=f"AI 对话调用失败: {exc}") from exc
+        logger.exception("[LangChain Router] ReAct Agent 调用失败")
+        raise HTTPException(status_code=502, detail=f"AI Agent 调用失败: {exc}") from exc
 
     return ChatResponse(
-        reply=reply,
-        conversation_id="",  # 由 Go 层生成和管理
+        reply=result["reply"],
+        conversation_id=payload.conversation_id,
+        edited_markdown=result.get("edited_markdown", ""),
     )
 
 

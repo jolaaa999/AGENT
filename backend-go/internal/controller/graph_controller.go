@@ -272,6 +272,140 @@ func (gc *GraphController) DeleteFileGroup(c *gin.Context) {
 
 // ==================== 用户 ID 解析 ====================
 
+func (gc *GraphController) RenameFile(c *gin.Context) {
+	var req struct {
+		FileID  string `json:"file_id" binding:"required"`
+		NewName string `json:"new_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.RenameFile(c.Request.Context(), userID, req.FileID, req.NewName); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename file", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "renamed"})
+}
+
+func (gc *GraphController) RenameFileGroup(c *gin.Context) {
+	var req struct {
+		GroupID string `json:"group_id" binding:"required"`
+		NewName string `json:"new_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.RenameFileGroup(c.Request.Context(), userID, req.GroupID, req.NewName); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename file group", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "renamed"})
+}
+
+func (gc *GraphController) AddFileToGroup(c *gin.Context) {
+	var req struct {
+		FileID  string `json:"file_id" binding:"required"`
+		GroupID string `json:"group_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.AddFileToGroup(c.Request.Context(), userID, req.FileID, req.GroupID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add file to group", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "added"})
+}
+
+func (gc *GraphController) TogglePinFile(c *gin.Context) {
+	fileID := strings.TrimSpace(c.Query("file_id"))
+	if fileID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file_id query param is required"})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.TogglePinFile(c.Request.Context(), userID, fileID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to toggle pin", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func (gc *GraphController) TogglePinFileGroup(c *gin.Context) {
+	groupID := strings.TrimSpace(c.Query("group_id"))
+	if groupID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group_id query param is required"})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.TogglePinFileGroup(c.Request.Context(), userID, groupID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to toggle pin", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ==================== 对话管理 ====================
+
+func (gc *GraphController) GetConversation(c *gin.Context) {
+	fileID := strings.TrimSpace(c.Query("file_id"))
+	fileGroupID := strings.TrimSpace(c.Query("file_group_id"))
+	convID := strings.TrimSpace(c.Query("conversation_id"))
+
+	userID := gc.resolveUserID(c, "")
+
+	if convID != "" {
+		conv, err := gc.service.GetConversation(c.Request.Context(), userID, convID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get conversation", "detail": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, conv)
+		return
+	}
+
+	conv, err := gc.service.GetOrCreateConversation(c.Request.Context(), userID, fileID, fileGroupID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get or create conversation", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, conv)
+}
+
+func (gc *GraphController) SaveMessage(c *gin.Context) {
+	var req model.SaveMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.SaveMessage(c.Request.Context(), req, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save message", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "saved"})
+}
+
+func (gc *GraphController) DeleteConversation(c *gin.Context) {
+	convID := strings.TrimSpace(c.Query("conversation_id"))
+	if convID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_id query param is required"})
+		return
+	}
+	userID := gc.resolveUserID(c, "")
+	if err := gc.service.DeleteConversation(c.Request.Context(), userID, convID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete conversation", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
 func (gc *GraphController) resolveUserID(c *gin.Context, bodyUserID string) string {
 	if value := strings.TrimSpace(bodyUserID); value != "" {
 		return value

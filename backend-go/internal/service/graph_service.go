@@ -34,6 +34,16 @@ type GraphService interface {
 	ListUserFiles(ctx context.Context, userID string) ([]model.UserFile, []model.FileGroup, error)
 	DeleteFile(ctx context.Context, userID, fileID string) error
 	DeleteFileGroup(ctx context.Context, userID, groupID string) error
+	RenameFile(ctx context.Context, userID, fileID, newName string) error
+	RenameFileGroup(ctx context.Context, userID, groupID, newName string) error
+	AddFileToGroup(ctx context.Context, userID, fileID, groupID string) error
+	TogglePinFile(ctx context.Context, userID, fileID string) error
+	TogglePinFileGroup(ctx context.Context, userID, groupID string) error
+	// 对话管理
+	GetOrCreateConversation(ctx context.Context, userID, fileID, fileGroupID string) (model.Conversation, error)
+	SaveMessage(ctx context.Context, req model.SaveMessageRequest, userID string) error
+	GetConversation(ctx context.Context, userID, conversationID string) (model.Conversation, error)
+	DeleteConversation(ctx context.Context, userID, conversationID string) error
 }
 
 type graphService struct {
@@ -89,6 +99,21 @@ func (s *graphService) UploadNote(ctx context.Context, req model.UploadNoteReque
 // ==================== 图谱上传（LangChain 诊断流水线） ====================
 
 func (s *graphService) UploadNoteLangChain(ctx context.Context, req model.UploadNoteRequest, userID string) (map[string]interface{}, error) {
+	// 如果没有指定 file_id，自动创建一个文件
+	fileID := req.FileID
+	if fileID == "" {
+		var err error
+		// 用笔记前 30 个字符作为文件名
+		name := req.Markdown
+		if len(name) > 30 {
+			name = name[:30]
+		}
+		fileID, err = s.repository.CreateFile(ctx, userID, name, req.FileGroupID)
+		if err != nil {
+			return nil, fmt.Errorf("auto-create file: %w", err)
+		}
+	}
+
 	diagReq := model.LangChainDiagnoseRequest{Markdown: req.Markdown}
 	payload, err := json.Marshal(diagReq)
 	if err != nil {
@@ -109,7 +134,7 @@ func (s *graphService) UploadNoteLangChain(ctx context.Context, req model.Upload
 	}
 
 	// 将 LangChain 响应转换为 GraphData
-	graphData := normalizeLangChainData(diagResp, req.FileID, req.FileGroupID)
+	graphData := normalizeLangChainData(diagResp, fileID, req.FileGroupID)
 	if err := s.repository.UpsertGraph(ctx, userID, graphData); err != nil {
 		return nil, fmt.Errorf("persist langchain graph data into neo4j: %w", err)
 	}
@@ -128,6 +153,7 @@ func (s *graphService) UploadNoteLangChain(ctx context.Context, req model.Upload
 
 	return map[string]interface{}{
 		"user_id":          userID,
+		"file_id":          fileID,
 		"entities_count":   len(graphData.Entities),
 		"relations_count":  len(graphData.Relations),
 		"error_count":      errorCount,
@@ -241,6 +267,44 @@ func (s *graphService) DeleteFile(ctx context.Context, userID, fileID string) er
 
 func (s *graphService) DeleteFileGroup(ctx context.Context, userID, groupID string) error {
 	return s.repository.DeleteFileGroup(ctx, userID, groupID)
+}
+
+func (s *graphService) RenameFile(ctx context.Context, userID, fileID, newName string) error {
+	return s.repository.RenameFile(ctx, userID, fileID, newName)
+}
+
+func (s *graphService) RenameFileGroup(ctx context.Context, userID, groupID, newName string) error {
+	return s.repository.RenameFileGroup(ctx, userID, groupID, newName)
+}
+
+func (s *graphService) AddFileToGroup(ctx context.Context, userID, fileID, groupID string) error {
+	return s.repository.AddFileToGroup(ctx, userID, fileID, groupID)
+}
+
+func (s *graphService) TogglePinFile(ctx context.Context, userID, fileID string) error {
+	return s.repository.TogglePinFile(ctx, userID, fileID)
+}
+
+func (s *graphService) TogglePinFileGroup(ctx context.Context, userID, groupID string) error {
+	return s.repository.TogglePinFileGroup(ctx, userID, groupID)
+}
+
+// ==================== 对话管理 ====================
+
+func (s *graphService) GetOrCreateConversation(ctx context.Context, userID, fileID, fileGroupID string) (model.Conversation, error) {
+	return s.repository.GetOrCreateConversation(ctx, userID, fileID, fileGroupID)
+}
+
+func (s *graphService) SaveMessage(ctx context.Context, req model.SaveMessageRequest, userID string) error {
+	return s.repository.SaveMessage(ctx, req, userID)
+}
+
+func (s *graphService) GetConversation(ctx context.Context, userID, conversationID string) (model.Conversation, error) {
+	return s.repository.GetConversation(ctx, userID, conversationID)
+}
+
+func (s *graphService) DeleteConversation(ctx context.Context, userID, conversationID string) error {
+	return s.repository.DeleteConversation(ctx, userID, conversationID)
 }
 
 // ==================== 内部辅助 ====================

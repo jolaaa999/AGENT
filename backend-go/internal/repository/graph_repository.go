@@ -25,6 +25,16 @@ type GraphRepository interface {
 	ListUserFiles(ctx context.Context, userID string) ([]model.UserFile, []model.FileGroup, error)
 	DeleteFile(ctx context.Context, userID, fileID string) error
 	DeleteFileGroup(ctx context.Context, userID, groupID string) error
+	RenameFile(ctx context.Context, userID, fileID, newName string) error
+	RenameFileGroup(ctx context.Context, userID, groupID, newName string) error
+	AddFileToGroup(ctx context.Context, userID, fileID, groupID string) error
+	TogglePinFile(ctx context.Context, userID, fileID string) error
+	TogglePinFileGroup(ctx context.Context, userID, groupID string) error
+	// 对话管理
+	GetOrCreateConversation(ctx context.Context, userID, fileID, fileGroupID string) (model.Conversation, error)
+	SaveMessage(ctx context.Context, req model.SaveMessageRequest, userID string) error
+	GetConversation(ctx context.Context, userID, conversationID string) (model.Conversation, error)
+	DeleteConversation(ctx context.Context, userID, conversationID string) error
 }
 
 type graphRepository struct {
@@ -253,11 +263,12 @@ func (r *graphRepository) GetPathsToConcept(ctx context.Context, userID, concept
 	`, maxDepth)
 
 	// 同时查询目标概念的所有直接关联节点（用于前端专注模式的高亮）
-	relatedQuery := fmt.Sprintf(`
+	// 返回 source/target 使用概念名而非 Neo4j 内部 ID，确保前端能匹配节点
+	relatedQuery := `
 		MATCH (m:Concept {user_id: $user_id, name: $concept})
 		MATCH (related:Concept {user_id: $user_id})-[r]-(m)
-		RETURN DISTINCT related, r, type(r) AS rel_type
-	`)
+		RETURN DISTINCT related, r, startNode(r).name AS source_name, endNode(r).name AS target_name, type(r) AS rel_type
+	`
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -358,19 +369,25 @@ func (r *graphRepository) GetPathsToConcept(ctx context.Context, userID, concept
 				}
 			}
 			if rel, ok := relVal.(neo4j.Relationship); ok {
-				edgeKey := fmt.Sprintf("%d", rel.Id)
-				if _, exists := allEdges[edgeKey]; !exists {
-					allEdges[edgeKey] = model.G6Edge{
-						ID:     edgeKey,
-						Source: asString(rel.StartId),
-						Target: asString(rel.EndId),
-						Label:  rel.Type,
-						Status: asString(rel.Props["status"]),
-						Reason: asString(rel.Props["reason"]),
-						Data:   rel.Props,
+					sourceName, _ := record.Get("source_name")
+					targetName, _ := record.Get("target_name")
+					src := asString(sourceName)
+					tgt := asString(targetName)
+					if src == "" { src = fmt.Sprintf("%d", rel.StartId) }
+					if tgt == "" { tgt = fmt.Sprintf("%d", rel.EndId) }
+					edgeKey := fmt.Sprintf("%s-%s-%s", src, rel.Type, tgt)
+					if _, exists := allEdges[edgeKey]; !exists {
+						allEdges[edgeKey] = model.G6Edge{
+							ID:     edgeKey,
+							Source: src,
+							Target: tgt,
+							Label:  rel.Type,
+							Status: asString(rel.Props["status"]),
+							Reason: asString(rel.Props["reason"]),
+							Data:   rel.Props,
+						}
 					}
 				}
-			}
 		}
 
 		return nil, nil
@@ -548,7 +565,7 @@ func (r *graphRepository) ListUserFiles(ctx context.Context, userID string) ([]m
 		// 查询文件
 		fileResult, err := tx.Run(ctx, `
 			MATCH (f:File {user_id: $user_id})
-			RETURN f ORDER BY f.created_at DESC
+			RETURN f ORDER BY coalesce(f.pinned, false) DESC, f.created_at DESC
 		`, map[string]interface{}{"user_id": userID})
 		if err != nil {
 			return nil, err
@@ -561,6 +578,7 @@ func (r *graphRepository) ListUserFiles(ctx context.Context, userID string) ([]m
 					Name:        asString(f.Props["name"]),
 					UserID:      userID,
 					FileGroupID: asString(f.Props["file_group_id"]),
+					Pinned:      f.Props["pinned"] == true,
 					CreatedAt:   asString(f.Props["created_at"]),
 					UpdatedAt:   asString(f.Props["updated_at"]),
 				})
@@ -570,7 +588,7 @@ func (r *graphRepository) ListUserFiles(ctx context.Context, userID string) ([]m
 		// 查询文件组
 		groupResult, err := tx.Run(ctx, `
 			MATCH (fg:FileGroup {user_id: $user_id})
-			RETURN fg ORDER BY fg.created_at DESC
+			RETURN fg ORDER BY coalesce(fg.pinned, false) DESC, fg.created_at DESC
 		`, map[string]interface{}{"user_id": userID})
 		if err != nil {
 			return nil, err
@@ -589,6 +607,7 @@ func (r *graphRepository) ListUserFiles(ctx context.Context, userID string) ([]m
 					Name:    asString(g.Props["name"]),
 					UserID:  userID,
 					FileIDs: fileIDs,
+					Pinned:  g.Props["pinned"] == true,
 				})
 			}
 		}
@@ -618,6 +637,267 @@ func (r *graphRepository) DeleteFileGroup(ctx context.Context, userID, groupID s
 		_, err := tx.Run(ctx, `
 			MATCH (fg:FileGroup {user_id: $user_id, group_id: $group_id}) DETACH DELETE fg
 		`, map[string]interface{}{"user_id": userID, "group_id": groupID})
+		return nil, err
+	})
+	return err
+}
+
+func (r *graphRepository) RenameFile(ctx context.Context, userID, fileID, newName string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (f:File {user_id: $user_id, file_id: $file_id})
+			SET f.name = $name, f.updated_at = $now
+		`, map[string]interface{}{"user_id": userID, "file_id": fileID, "name": newName, "now": time.Now().UTC().Format(time.RFC3339)})
+		return nil, err
+	})
+	return err
+}
+
+func (r *graphRepository) RenameFileGroup(ctx context.Context, userID, groupID, newName string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (fg:FileGroup {user_id: $user_id, group_id: $group_id})
+			SET fg.name = $name
+		`, map[string]interface{}{"user_id": userID, "group_id": groupID, "name": newName})
+		return nil, err
+	})
+	return err
+}
+
+func (r *graphRepository) TogglePinFile(ctx context.Context, userID, fileID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (f:File {user_id: $user_id, file_id: $file_id})
+			SET f.pinned = NOT coalesce(f.pinned, false)
+		`, map[string]interface{}{"user_id": userID, "file_id": fileID})
+		return nil, err
+	})
+	return err
+}
+
+func (r *graphRepository) TogglePinFileGroup(ctx context.Context, userID, groupID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (fg:FileGroup {user_id: $user_id, group_id: $group_id})
+			SET fg.pinned = NOT coalesce(fg.pinned, false)
+		`, map[string]interface{}{"user_id": userID, "group_id": groupID})
+		return nil, err
+	})
+	return err
+}
+
+func (r *graphRepository) AddFileToGroup(ctx context.Context, userID, fileID, groupID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (f:File {user_id: $user_id, file_id: $file_id})
+			SET f.file_group_id = $group_id
+			WITH f
+			MATCH (fg:FileGroup {user_id: $user_id, group_id: $group_id})
+			SET fg.file_ids = CASE WHEN $file_id IN fg.file_ids THEN fg.file_ids ELSE fg.file_ids + $file_id END
+		`, map[string]interface{}{"user_id": userID, "file_id": fileID, "group_id": groupID})
+		return nil, err
+	})
+	return err
+}
+
+// ==================== 对话管理 ====================
+
+func (r *graphRepository) GetOrCreateConversation(ctx context.Context, userID, fileID, fileGroupID string) (model.Conversation, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	var conv model.Conversation
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		// 查找已有对话（按 file_id 或 file_group_id 匹配）
+		convID := fmt.Sprintf("conv_%d", time.Now().UnixNano())
+		query := `
+			MATCH (c:Conversation {user_id: $user_id})
+			WHERE ($file_id <> '' AND c.file_id = $file_id)
+			   OR ($file_group_id <> '' AND c.file_group_id = $file_group_id)
+			RETURN c ORDER BY c.updated_at DESC LIMIT 1
+		`
+		result, err := tx.Run(ctx, query, map[string]interface{}{
+			"user_id":        userID,
+			"file_id":        fileID,
+			"file_group_id":  fileGroupID,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		if result.Next(ctx) {
+			node, _ := result.Record().Get("c")
+			if n, ok := node.(neo4j.Node); ok {
+				convID = asString(n.Props["conversation_id"])
+			}
+		} else {
+			// 无已有对话，创建新对话节点
+			title := "新对话"
+			if fileID != "" {
+				title = "文件对话"
+			} else if fileGroupID != "" {
+				title = "文件组对话"
+			}
+			_, err := tx.Run(ctx, `
+				CREATE (c:Conversation {
+					conversation_id: $conv_id, user_id: $user_id,
+					file_id: $file_id, file_group_id: $file_group_id,
+					title: $title, created_at: $now, updated_at: $now
+				})
+			`, map[string]interface{}{
+				"conv_id":        convID,
+				"user_id":        userID,
+				"file_id":        fileID,
+				"file_group_id":  fileGroupID,
+				"title":          title,
+				"now":            time.Now().UTC().Format(time.RFC3339),
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// 加载对话消息
+		msgResult, err := tx.Run(ctx, `
+			MATCH (c:Conversation {conversation_id: $conv_id})
+			OPTIONAL MATCH (c)-[:CONTAINS]->(m:Message)
+			RETURN c, m ORDER BY m.timestamp
+		`, map[string]interface{}{"conv_id": convID})
+		if err != nil {
+			return nil, err
+		}
+
+		messages := make([]model.ConversationMessage, 0)
+		for msgResult.Next(ctx) {
+			record := msgResult.Record()
+			// 提取对话节点信息
+			if convNode, ok := record.Values[0].(neo4j.Node); ok {
+				conv.ID = asString(convNode.Props["conversation_id"])
+				conv.FileID = asString(convNode.Props["file_id"])
+				conv.FileGroupID = asString(convNode.Props["file_group_id"])
+				conv.UserID = userID
+				conv.Title = asString(convNode.Props["title"])
+				conv.CreatedAt = asString(convNode.Props["created_at"])
+				conv.UpdatedAt = asString(convNode.Props["updated_at"])
+			}
+			// 提取消息
+			if msgNode, ok := record.Values[1].(neo4j.Node); ok {
+				messages = append(messages, model.ConversationMessage{
+					Role:      asString(msgNode.Props["role"]),
+					Content:   asString(msgNode.Props["content"]),
+					Timestamp: asString(msgNode.Props["timestamp"]),
+				})
+			}
+		}
+		conv.Messages = messages
+		if len(conv.Messages) == 0 {
+			conv.Messages = []model.ConversationMessage{}
+		}
+		return nil, nil
+	})
+
+	return conv, err
+}
+
+func (r *graphRepository) SaveMessage(ctx context.Context, req model.SaveMessageRequest, userID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	// 确保对话存在
+	convID := req.ConversationID
+	if convID == "" {
+		var err error
+		conv, err := r.GetOrCreateConversation(ctx, userID, req.FileID, req.FileGroupID)
+		if err != nil {
+			return err
+		}
+		convID = conv.ID
+	}
+
+	msgID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (c:Conversation {conversation_id: $conv_id})
+			CREATE (m:Message {message_id: $msg_id, role: $role, content: $content, timestamp: $now})
+			CREATE (c)-[:CONTAINS]->(m)
+			SET c.updated_at = $now
+		`, map[string]interface{}{
+			"conv_id": convID,
+			"msg_id":  msgID,
+			"role":    req.Role,
+			"content": req.Content,
+			"now":     now,
+		})
+		return nil, err
+	})
+	return err
+}
+
+func (r *graphRepository) GetConversation(ctx context.Context, userID, conversationID string) (model.Conversation, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	var conv model.Conversation
+	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, `
+			MATCH (c:Conversation {user_id: $user_id, conversation_id: $conv_id})
+			OPTIONAL MATCH (c)-[:CONTAINS]->(m:Message)
+			RETURN c, m ORDER BY m.timestamp
+		`, map[string]interface{}{"user_id": userID, "conv_id": conversationID})
+		if err != nil {
+			return nil, err
+		}
+
+		messages := make([]model.ConversationMessage, 0)
+		for result.Next(ctx) {
+			record := result.Record()
+			if convNode, ok := record.Values[0].(neo4j.Node); ok && conv.ID == "" {
+				conv.ID = asString(convNode.Props["conversation_id"])
+				conv.FileID = asString(convNode.Props["file_id"])
+				conv.FileGroupID = asString(convNode.Props["file_group_id"])
+				conv.UserID = userID
+				conv.Title = asString(convNode.Props["title"])
+				conv.CreatedAt = asString(convNode.Props["created_at"])
+				conv.UpdatedAt = asString(convNode.Props["updated_at"])
+			}
+			if msgNode, ok := record.Values[1].(neo4j.Node); ok {
+				messages = append(messages, model.ConversationMessage{
+					Role:      asString(msgNode.Props["role"]),
+					Content:   asString(msgNode.Props["content"]),
+					Timestamp: asString(msgNode.Props["timestamp"]),
+				})
+			}
+		}
+		conv.Messages = messages
+		if len(conv.Messages) == 0 {
+			conv.Messages = []model.ConversationMessage{}
+		}
+		return nil, nil
+	})
+	return conv, err
+}
+
+func (r *graphRepository) DeleteConversation(ctx context.Context, userID, conversationID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (c:Conversation {user_id: $user_id, conversation_id: $conv_id})
+			OPTIONAL MATCH (c)-[:CONTAINS]->(m:Message)
+			DETACH DELETE c, m
+		`, map[string]interface{}{"user_id": userID, "conv_id": conversationID})
 		return nil, err
 	})
 	return err

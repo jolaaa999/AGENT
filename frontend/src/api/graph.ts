@@ -65,6 +65,7 @@ export interface UserFile {
   name: string;
   user_id: string;
   file_group_id?: string;
+  pinned?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -74,20 +75,24 @@ export interface FileGroup {
   name: string;
   user_id: string;
   file_ids: string[];
+  pinned?: boolean;
 }
 
 // ==================== AI 对话类型 ====================
 
 export interface ChatRequest {
   user_message: string;
+  conversation_id?: string;
+  markdown?: string;
   graph_nodes?: string;
   graph_edges?: string;
-  conversation_history?: string;
+  image_base64?: string;
 }
 
 export interface ChatResponse {
   reply: string;
   conversation_id: string;
+  edited_markdown?: string;
 }
 
 export interface LearningPathRequest {
@@ -185,11 +190,89 @@ export function createFileGroup(name: string, userId?: string) {
 }
 
 export function deleteFile(fileId: string, userId?: string) {
-  return request<{ status: string }>(`/files/delete?file_id=${encodeURIComponent(fileId)}&user_id=${userId ?? ""}`);
+  return request<{ status: string }>(`/files/delete?file_id=${encodeURIComponent(fileId)}&user_id=${userId ?? ""}`, {
+    method: "DELETE",
+  });
 }
 
 export function deleteFileGroup(groupId: string, userId?: string) {
-  return request<{ status: string }>(`/files/group/delete?group_id=${encodeURIComponent(groupId)}&user_id=${userId ?? ""}`);
+  return request<{ status: string }>(`/files/group/delete?group_id=${encodeURIComponent(groupId)}&user_id=${userId ?? ""}`, {
+    method: "DELETE",
+  });
+}
+
+export function renameFile(fileId: string, newName: string, userId?: string) {
+  return request<{ status: string }>("/files/rename", {
+    method: "PUT",
+    body: JSON.stringify({ file_id: fileId, new_name: newName, user_id: userId }),
+  });
+}
+
+export function renameFileGroup(groupId: string, newName: string, userId?: string) {
+  return request<{ status: string }>("/files/group/rename", {
+    method: "PUT",
+    body: JSON.stringify({ group_id: groupId, new_name: newName, user_id: userId }),
+  });
+}
+
+export function addFileToGroup(fileId: string, groupId: string, userId?: string) {
+  return request<{ status: string }>("/files/add-to-group", {
+    method: "POST",
+    body: JSON.stringify({ file_id: fileId, group_id: groupId, user_id: userId }),
+  });
+}
+
+export function togglePinFile(fileId: string, userId?: string) {
+  return request<{ status: string }>(`/files/pin?file_id=${encodeURIComponent(fileId)}&user_id=${userId ?? ""}`, {
+    method: "PUT",
+  });
+}
+
+export function togglePinFileGroup(groupId: string, userId?: string) {
+  return request<{ status: string }>(`/files/group/pin?group_id=${encodeURIComponent(groupId)}&user_id=${userId ?? ""}`, {
+    method: "PUT",
+  });
+}
+
+// ==================== 对话管理 ====================
+
+export interface ConversationMessage {
+  role: "user" | "ai";
+  content: string;
+  timestamp?: string;
+}
+
+export interface Conversation {
+  id: string;
+  file_id?: string;
+  file_group_id?: string;
+  user_id: string;
+  title: string;
+  messages: ConversationMessage[];
+  created_at: string;
+  updated_at: string;
+}
+
+export function getConversation(params: { file_id?: string; file_group_id?: string; conversation_id?: string; user_id?: string }) {
+  const query = new URLSearchParams();
+  if (params.file_id) query.set("file_id", params.file_id);
+  if (params.file_group_id) query.set("file_group_id", params.file_group_id);
+  if (params.conversation_id) query.set("conversation_id", params.conversation_id);
+  if (params.user_id) query.set("user_id", params.user_id);
+  return request<Conversation>(`/conversation?${query.toString()}`);
+}
+
+export function saveMessage(payload: { conversation_id: string; file_id?: string; file_group_id?: string; role: string; content: string }) {
+  return request<{ status: string }>("/conversation/message", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteConversation(conversationId: string, userId?: string) {
+  return request<{ status: string }>(`/conversation?conversation_id=${encodeURIComponent(conversationId)}&user_id=${userId ?? ""}`, {
+    method: "DELETE",
+  });
 }
 
 // ==================== AI 对话 ====================

@@ -90,20 +90,22 @@ type GraphData struct {
 
 // ==================== 文件管理模型 ====================
 
-type FileGroup struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	UserID   string   `json:"user_id"`
-	FileIDs  []string `json:"file_ids"` // 组内文件的 ID 列表
-}
-
 type UserFile struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	UserID      string `json:"user_id"`
-	FileGroupID string `json:"file_group_id,omitempty"` // 所属文件组（空=独立文件）
+	FileGroupID string `json:"file_group_id,omitempty"`
+	Pinned      bool   `json:"pinned"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
+}
+
+type FileGroup struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	UserID  string   `json:"user_id"`
+	FileIDs []string `json:"file_ids"` // 组内文件的 ID 列表
+	Pinned  bool     `json:"pinned"`
 }
 
 // ==================== G6 前端可视化模型 ====================
@@ -166,15 +168,18 @@ type ExplainResponse struct {
 // ==================== AI 对话模型 ====================
 
 type ChatRequest struct {
-	UserMessage        string `json:"user_message" binding:"required"`
-	GraphNodes         string `json:"graph_nodes"`
-	GraphEdges         string `json:"graph_edges"`
-	ConversationHistory string `json:"conversation_history"`
+	UserMessage    string `json:"user_message" binding:"required"`
+	ConversationID string `json:"conversation_id"`
+	Markdown       string `json:"markdown"`
+	GraphNodes     string `json:"graph_nodes"`
+	GraphEdges     string `json:"graph_edges"`
+	ImageBase64    string `json:"image_base64"`
 }
 
 type ChatResponse struct {
-	Reply          string `json:"reply"`
-	ConversationID string `json:"conversation_id"`
+	Reply           string `json:"reply"`
+	ConversationID  string `json:"conversation_id"`
+	EditedMarkdown  string `json:"edited_markdown,omitempty"`
 }
 
 // ==================== 学习路径指导模型 ====================
@@ -187,4 +192,38 @@ type LearningPathRequest struct {
 
 type LearningPathResponse struct {
 	Guidance string `json:"guidance"`
+}
+
+// ==================== 对话模型 ====================
+
+// Conversation 代表一个文件/文件组的独立对话
+type Conversation struct {
+	ID           string            `json:"id"`
+	FileID       string            `json:"file_id,omitempty"`
+	FileGroupID  string            `json:"file_group_id,omitempty"`
+	UserID       string            `json:"user_id"`
+	Title        string            `json:"title"`
+	Messages     []ConversationMessage `json:"messages"`
+	CreatedAt    string            `json:"created_at"`
+	UpdatedAt    string            `json:"updated_at"`
+}
+
+type ConversationMessage struct {
+	Role      string `json:"role"` // "user" | "ai"
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp"`
+}
+
+type SaveMessageRequest struct {
+	ConversationID string `json:"conversation_id"`
+	FileID         string `json:"file_id,omitempty"`
+	FileGroupID    string `json:"file_group_id,omitempty"`
+	Role           string `json:"role" binding:"required"`
+	Content        string `json:"content" binding:"required"`
+}
+
+type CreateConversationRequest struct {
+	FileID      string `json:"file_id,omitempty"`
+	FileGroupID string `json:"file_group_id,omitempty"`
+	Title       string `json:"title"`
 }

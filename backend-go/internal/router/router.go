@@ -48,7 +48,17 @@ func New(cfg config.Config, graphController *controller.GraphController) *gin.En
 	r.POST("/files/create", graphController.CreateFile)
 	r.POST("/files/group/create", graphController.CreateFileGroup)
 	r.DELETE("/files/delete", graphController.DeleteFile)
+	r.PUT("/files/rename", graphController.RenameFile)
+	r.PUT("/files/group/rename", graphController.RenameFileGroup)
+	r.POST("/files/add-to-group", graphController.AddFileToGroup)
+	r.PUT("/files/pin", graphController.TogglePinFile)
+	r.PUT("/files/group/pin", graphController.TogglePinFileGroup)
 	r.DELETE("/files/group/delete", graphController.DeleteFileGroup)
+
+	// 对话管理
+	r.GET("/conversation", graphController.GetConversation)
+	r.POST("/conversation/message", graphController.SaveMessage)
+	r.DELETE("/conversation", graphController.DeleteConversation)
 
 	return r
 }

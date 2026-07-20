@@ -40,11 +40,23 @@
 
 4. 启动 AI 引擎（Python + LangChain Agent）：
 
+   建议使用虚拟环境，避免依赖污染系统 Python：
+
    ```bash
    cd ai-engine-python
+   python -m venv .venv
+
+   # 激活虚拟环境
+   # Linux / macOS:
+   source .venv/bin/activate
+   # Windows PowerShell:
+   # .\.venv\Scripts\Activate.ps1
+
    pip install -r requirements.txt
    uvicorn main:app --reload --port 8000
    ```
+
+   之后每次新开终端，先进入 `ai-engine-python` 并重新激活虚拟环境，再启动服务。
 
    启动后可访问：
    - `GET  /health` — 服务健康检查

@@ -87,6 +87,48 @@ const currentConversationId = ref("");
 const isLightRAGMode = ref(true);
 const expandedNodes = ref<Set<string>>(new Set());
 
+const leftWidth = ref(280);
+const rightWidth = ref(340);
+const dragging = ref<"left" | "right" | null>(null);
+
+function onDividerMousedown(side: "left" | "right", e: MouseEvent) {
+  dragging.value = side;
+  e.preventDefault();
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+}
+
+function onDividerMousemove(e: MouseEvent) {
+  if (!dragging.value) return;
+  const minW = 200;
+  const maxW = 480;
+  if (dragging.value === "left") {
+    leftWidth.value = Math.min(maxW, Math.max(minW, e.clientX));
+  } else {
+    rightWidth.value = Math.min(maxW, Math.max(minW, window.innerWidth - e.clientX));
+  }
+}
+
+function onDividerMouseup() {
+  if (!dragging.value) return;
+  dragging.value = null;
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  resizeGraph();
+}
+
+function resizeGraph() {
+  requestAnimationFrame(() => {
+    if (graphRoot.value && graph) {
+      const r = graphRoot.value.getBoundingClientRect();
+      graph.resize(r.width, r.height);
+    }
+  });
+}
+
+window.addEventListener("mousemove", onDividerMousemove);
+window.addEventListener("mouseup", onDividerMouseup);
+
 let graph: Graph | null = null;
 let graphRawData: GraphResponse = { nodes: [], edges: [] };
 let resizeObserver: ResizeObserver | null = null;
@@ -750,6 +792,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("mousemove", onDividerMousemove);
+  window.removeEventListener("mouseup", onDividerMouseup);
   resizeObserver?.disconnect();
   graph?.destroy();
   graph = null;
@@ -758,10 +802,11 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="flex h-screen w-full overflow-hidden bg-[#F8FAFC]">
-    <!-- 左侧：文件管理 280px -->
+    <!-- 左侧：文件管理（可拖拽调宽） -->
     <FileSidebar
       v-model:new-group-name="newGroupName"
       v-model:menu-open="menuOpen"
+      :width="leftWidth"
       :logged-in-user-id="loggedInUserId"
       :files="files"
       :file-groups="fileGroups"
@@ -780,6 +825,16 @@ onBeforeUnmount(() => {
       @add-to-group="(id) => (addFileToGroupTarget = id)"
       @refresh="loadFileList"
     />
+
+    <div
+      class="group relative w-1.5 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-indigo-300 active:bg-indigo-400"
+      @mousedown="onDividerMousedown('left', $event)"
+    >
+      <div class="absolute inset-y-0 -left-1 -right-1" />
+      <div
+        class="absolute left-1/2 top-1/2 h-8 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300 transition-colors group-hover:bg-indigo-400"
+      />
+    </div>
 
     <!-- 中间：知识图谱（视觉中心，占满剩余宽度） -->
     <section class="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -800,7 +855,7 @@ onBeforeUnmount(() => {
         </button>
       </header>
 
-      <div class="relative m-3 min-h-0 flex-1 overflow-hidden rounded-[18px] border border-gray-200 bg-slate-950 shadow-sm">
+      <div class="relative m-3 min-h-0 flex-1 overflow-hidden rounded-[18px] border border-gray-200 bg-white shadow-sm">
         <div ref="graphRoot" class="absolute inset-0" />
 
         <div
@@ -842,8 +897,21 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <!-- 右侧：导入 / 导航 / 对话 320px，不挤压中间图谱 -->
-    <aside class="flex w-[320px] shrink-0 flex-col gap-3 overflow-hidden border-l border-gray-200 bg-[#F8FAFC] p-3">
+    <div
+      class="group relative w-1.5 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-violet-300 active:bg-violet-400"
+      @mousedown="onDividerMousedown('right', $event)"
+    >
+      <div class="absolute inset-y-0 -left-1 -right-1" />
+      <div
+        class="absolute left-1/2 top-1/2 h-8 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300 transition-colors group-hover:bg-violet-400"
+      />
+    </div>
+
+    <!-- 右侧：导入 / 导航 / 对话（可拖拽调宽） -->
+    <aside
+      :style="{ width: `${rightWidth}px` }"
+      class="flex shrink-0 flex-col gap-3 overflow-hidden border-l border-gray-200 bg-[#F8FAFC] p-3"
+    >
       <ImportPanel
         v-model:markdown="markdown"
         v-model:user-id="userId"

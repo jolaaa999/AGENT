@@ -3,6 +3,7 @@ import { FolderPlus, MoreHorizontal, RefreshCw, Upload } from "lucide-vue-next";
 import type { FileGroup, UserFile } from "../api/graph";
 
 defineProps<{
+  width: number;
   loggedInUserId: string;
   files: UserFile[];
   fileGroups: FileGroup[];
@@ -31,7 +32,10 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <aside class="flex h-full w-[280px] shrink-0 flex-col border-r border-gray-200 bg-white">
+  <aside
+    :style="{ width: `${width}px` }"
+    class="flex h-full shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-white"
+  >
     <div class="flex items-center justify-between border-b border-gray-200 px-4 py-3">
       <div>
         <h2 class="text-base font-semibold text-slate-900">文件</h2>

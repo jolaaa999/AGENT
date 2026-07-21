@@ -3,7 +3,7 @@ uvicorn
 openai
 markdown-it-py
 python-dotenv
-# LangChain 智能体框架依赖
+# LangChain 
 langchain
 langchain-core
 langchain-openai

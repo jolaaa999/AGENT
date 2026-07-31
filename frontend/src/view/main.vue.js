@@ -42,6 +42,12 @@ const isChatting = ref(false);
 const currentConversationId = ref("");
 const isLightRAGMode = ref(true);
 const expandedNodes = ref(new Set());
+const graphSearch = ref("");
+const graphStatusFilter = ref("all");
+const graphLayoutMode = ref("auto");
+const activeLayout = ref("force");
+const isFocusMode = ref(false);
+const focusedNodeId = ref("");
 const leftWidth = ref(280);
 const rightWidth = ref(340);
 const dragging = ref(null);
@@ -530,22 +536,86 @@ async function initGraph() {
         if (isLightRAGMode.value && !expandedNodes.value.has(id)) {
             void expandNodeNeighbors(id);
         }
+        else if (isFocusMode.value) {
+            void focusNode(id);
+            void showNodeDetail(id);
+        }
         else {
             void showNodeDetail(id);
         }
+    });
+    graph.on("node:pointerenter", (e) => {
+        const id = resolveNodeIdFromEvent(e);
+        if (!id || !graph)
+            return;
+        const edgeIds = graphRawData.edges
+            .filter((edge) => edge.source === id || edge.target === id)
+            .map((edge) => edge.id || `${edge.source}-${edge.target}-${edge.label}`);
+        graph.setElementState(id, "highlight");
+        edgeIds.forEach((edgeId) => graph?.setElementState(edgeId, "highlight"));
+    });
+    graph.on("node:pointerleave", () => {
+        graph?.getData().nodes.forEach((node) => graph?.setElementState(node.id, []));
+        graph?.getData().edges.forEach((edge) => graph?.setElementState(edge.id, []));
     });
     graph.on("canvas:click", () => {
         selectedNodeDetail.value = null;
     });
 }
+function graphDataForDisplay(data) {
+    if (graphStatusFilter.value === "all")
+        return data;
+    const nodes = data.nodes.filter((node) => node.status === graphStatusFilter.value);
+    const ids = new Set(nodes.map((node) => node.id));
+    return { nodes, edges: data.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)) };
+}
+function localFocusData(nodeId, depth = 2) {
+    const nodeIds = new Set([nodeId]);
+    for (let level = 0; level < depth; level++) {
+        graphRawData.edges.forEach((edge) => {
+            if (nodeIds.has(edge.source) || nodeIds.has(edge.target)) {
+                nodeIds.add(edge.source);
+                nodeIds.add(edge.target);
+            }
+        });
+    }
+    return {
+        nodes: graphRawData.nodes.filter((node) => nodeIds.has(node.id)),
+        edges: graphRawData.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)),
+    };
+}
+function preferredLayout() {
+    if (graphLayoutMode.value !== "auto")
+        return graphLayoutMode.value;
+    return isNavigating.value || Boolean(selectedFileId.value) ? "dagre" : "force";
+}
+function prepareHierarchyData(data) {
+    const dependencyPattern = /PREREQUISITE|DEPENDS|REQUIRES|PRECEDES|PARENT|IS_A|PART_OF/i;
+    const hierarchyEdges = data.edges.filter((edge) => dependencyPattern.test(edge.label || ""));
+    if (hierarchyEdges.length === 0)
+        return data;
+    const supportingEdges = data.edges.filter((edge) => edge.status === "error" || edge.status === "supplement" || dependencyPattern.test(edge.label || ""));
+    const connected = new Set();
+    supportingEdges.forEach((edge) => {
+        connected.add(edge.source);
+        connected.add(edge.target);
+    });
+    return {
+        nodes: data.nodes.filter((node) => connected.has(node.id)),
+        edges: supportingEdges,
+    };
+}
 async function renderGraph(data, focusMode = false, pathData = [], layoutType = "force") {
     if (!graph)
         return;
+    const selectedLayout = graphLayoutMode.value === "auto" ? layoutType : graphLayoutMode.value;
+    activeLayout.value = selectedLayout;
+    const visibleData = graphDataForDisplay(selectedLayout === "dagre" ? prepareHierarchyData(data) : data);
     const focusSet = focusMode ? buildFocusSet(pathData) : undefined;
-    const styled = buildStyledGraph(data, focusSet);
+    const styled = buildStyledGraph(visibleData, focusSet);
     graph.setLayout(styled.nodes.some((n) => n.x !== undefined)
         ? { type: "preset", padding: 50 }
-        : getLayoutConfig(layoutType));
+        : getLayoutConfig(selectedLayout));
     graph.setData(styled);
     await graph.render();
 }
@@ -756,7 +826,7 @@ async function handlePathNavigate() {
     try {
         const r = await getGraphPath(concept.value.trim(), currentUserId(), maxDepth.value);
         const hasRelated = r.all_related && r.all_related.nodes && r.all_related.nodes.length > 0;
-        await renderGraph(hasRelated ? r.all_related : graphRawData, true, hasRelated ? [r.all_related] : r.paths, "force");
+        await renderGraph(hasRelated ? r.all_related : graphRawData, true, hasRelated ? [r.all_related] : r.paths, "dagre");
         if (r.dependency_tree?.length) {
             const g = await getLearningPath({
                 target_concept: concept.value.trim(),
@@ -774,9 +844,45 @@ async function handlePathNavigate() {
     }
 }
 async function resetFocus() {
+    isFocusMode.value = false;
+    focusedNodeId.value = "";
     await renderGraph(graphRawData, false, [], "force");
     isNavigating.value = false;
     statusText.value = "已退出专注模式";
+}
+async function focusNode(nodeId) {
+    const focused = localFocusData(nodeId);
+    isFocusMode.value = true;
+    focusedNodeId.value = nodeId;
+    await renderGraph(graphRawData, true, [focused], "force");
+    await graph?.focusElement?.(nodeId, { animation: { duration: 500 } });
+    statusText.value = `专注模式：${focused.nodes.length} 个相关知识点`;
+}
+async function searchGraph() {
+    const keyword = graphSearch.value.trim().toLowerCase();
+    if (!keyword)
+        return;
+    const node = graphRawData.nodes.find((item) => (item.label || item.id).toLowerCase().includes(keyword));
+    if (!node) {
+        statusText.value = `未找到概念「${graphSearch.value.trim()}」`;
+        return;
+    }
+    await focusNode(node.id);
+    await showNodeDetail(node.id);
+}
+async function applyStatusFilter() {
+    await renderGraph(graphRawData, isFocusMode.value, isFocusMode.value ? [localFocusData(focusedNodeId.value)] : [], preferredLayout());
+    statusText.value = graphStatusFilter.value === "all" ? "已显示全部状态" : `已筛选：${graphStatusFilter.value}`;
+}
+async function applyLayoutMode() {
+    await renderGraph(graphRawData, isFocusMode.value, isFocusMode.value && focusedNodeId.value ? [localFocusData(focusedNodeId.value)] : [], preferredLayout());
+    statusText.value = activeLayout.value === "dagre" ? "层级布局：前置知识从左向右排列" : "关系网络：按关联强度排列";
+}
+function fitGraph() {
+    void graph?.fitView?.({ when: "always", direction: "both" });
+}
+function zoomGraph(ratio) {
+    void graph?.zoomBy?.(ratio);
 }
 onMounted(async () => {
     await initGraph();
@@ -948,6 +1054,96 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.div)({
     ...{ class: "absolute inset-0" },
 });
 /** @type {typeof __VLS_ctx.graphRoot} */ ;
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "absolute left-4 top-4 z-20 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white/95 p-2 shadow-sm backdrop-blur" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "flex h-9 items-center overflow-hidden rounded-xl border border-slate-200 bg-white" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+    ...{ onKeyup: (__VLS_ctx.searchGraph) },
+    ...{ class: "w-40 px-3 text-sm outline-none" },
+    placeholder: "搜索概念…",
+});
+(__VLS_ctx.graphSearch);
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (__VLS_ctx.searchGraph) },
+    ...{ class: "h-full border-l border-slate-200 px-3 text-xs font-medium text-indigo-600 hover:bg-indigo-50" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    ...{ onChange: (__VLS_ctx.applyStatusFilter) },
+    value: (__VLS_ctx.graphStatusFilter),
+    ...{ class: "h-9 rounded-xl border border-slate-200 bg-white px-2 text-xs text-slate-600 outline-none" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "all",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "correct",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "error",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "supplement",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+    ...{ onChange: (__VLS_ctx.applyLayoutMode) },
+    value: (__VLS_ctx.graphLayoutMode),
+    ...{ class: "h-9 rounded-xl border border-slate-200 bg-white px-2 text-xs text-slate-600 outline-none" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "auto",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "dagre",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+    value: "force",
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (...[$event]) => {
+            __VLS_ctx.isFocusMode ? __VLS_ctx.resetFocus() : (__VLS_ctx.isFocusMode = true);
+        } },
+    ...{ class: "h-9 rounded-xl px-3 text-xs font-medium transition" },
+    ...{ class: (__VLS_ctx.isFocusMode ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200') },
+});
+(__VLS_ctx.isFocusMode ? "退出专注" : "专注模式");
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (__VLS_ctx.fitGraph) },
+    ...{ class: "h-9 rounded-xl bg-slate-100 px-3 text-xs text-slate-600 hover:bg-slate-200" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (...[$event]) => {
+            __VLS_ctx.zoomGraph(1.2);
+        } },
+    ...{ class: "h-9 w-9 rounded-xl bg-slate-100 text-sm text-slate-600 hover:bg-slate-200" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+    ...{ onClick: (...[$event]) => {
+            __VLS_ctx.zoomGraph(0.8);
+        } },
+    ...{ class: "h-9 w-9 rounded-xl bg-slate-100 text-sm text-slate-600 hover:bg-slate-200" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "absolute bottom-4 right-4 z-10 rounded-xl border border-slate-200 bg-white/90 px-3 py-2 text-[11px] text-slate-500 shadow-sm backdrop-blur" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+    ...{ class: "mr-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.i)({
+    ...{ class: "mr-1 inline-block h-2.5 w-2.5 rounded-full bg-blue-500" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+    ...{ class: "mr-3" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.i)({
+    ...{ class: "mr-1 inline-block h-2.5 w-2.5 rounded-full bg-red-500" },
+});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+__VLS_asFunctionalElement(__VLS_intrinsicElements.i)({
+    ...{ class: "mr-1 inline-block h-2.5 w-2.5 rounded-full border border-dashed border-violet-600 bg-violet-100" },
+});
 if (__VLS_ctx.selectedNodeDetail) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "absolute bottom-4 left-4 right-4 max-w-md rounded-[18px] border border-gray-200 bg-white/95 p-4 shadow-md backdrop-blur" },
@@ -1328,6 +1524,123 @@ if (__VLS_ctx.isLoading) {
 /** @type {__VLS_StyleScopedClasses['absolute']} */ ;
 /** @type {__VLS_StyleScopedClasses['inset-0']} */ ;
 /** @type {__VLS_StyleScopedClasses['absolute']} */ ;
+/** @type {__VLS_StyleScopedClasses['left-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['top-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['z-20']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex-wrap']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['gap-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-2xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-white/95']} */ ;
+/** @type {__VLS_StyleScopedClasses['p-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['shadow-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['backdrop-blur']} */ ;
+/** @type {__VLS_StyleScopedClasses['flex']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['items-center']} */ ;
+/** @type {__VLS_StyleScopedClasses['overflow-hidden']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-white']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-40']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['outline-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-l']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-medium']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-indigo-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-indigo-50']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-white']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['outline-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-white']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['outline-none']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['font-medium']} */ ;
+/** @type {__VLS_StyleScopedClasses['transition']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-xs']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-9']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-slate-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['hover:bg-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['absolute']} */ ;
+/** @type {__VLS_StyleScopedClasses['bottom-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['right-4']} */ ;
+/** @type {__VLS_StyleScopedClasses['z-10']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-xl']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-slate-200']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-white/90']} */ ;
+/** @type {__VLS_StyleScopedClasses['px-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['py-2']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-[11px]']} */ ;
+/** @type {__VLS_StyleScopedClasses['text-slate-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['shadow-sm']} */ ;
+/** @type {__VLS_StyleScopedClasses['backdrop-blur']} */ ;
+/** @type {__VLS_StyleScopedClasses['mr-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mr-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['inline-block']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-blue-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mr-3']} */ ;
+/** @type {__VLS_StyleScopedClasses['mr-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['inline-block']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-red-500']} */ ;
+/** @type {__VLS_StyleScopedClasses['mr-1']} */ ;
+/** @type {__VLS_StyleScopedClasses['inline-block']} */ ;
+/** @type {__VLS_StyleScopedClasses['h-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['w-2.5']} */ ;
+/** @type {__VLS_StyleScopedClasses['rounded-full']} */ ;
+/** @type {__VLS_StyleScopedClasses['border']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-dashed']} */ ;
+/** @type {__VLS_StyleScopedClasses['border-violet-600']} */ ;
+/** @type {__VLS_StyleScopedClasses['bg-violet-100']} */ ;
+/** @type {__VLS_StyleScopedClasses['absolute']} */ ;
 /** @type {__VLS_StyleScopedClasses['bottom-4']} */ ;
 /** @type {__VLS_StyleScopedClasses['left-4']} */ ;
 /** @type {__VLS_StyleScopedClasses['right-4']} */ ;
@@ -1587,6 +1900,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             isChatting: isChatting,
             currentConversationId: currentConversationId,
             isLightRAGMode: isLightRAGMode,
+            graphSearch: graphSearch,
+            graphStatusFilter: graphStatusFilter,
+            graphLayoutMode: graphLayoutMode,
+            isFocusMode: isFocusMode,
             leftWidth: leftWidth,
             rightWidth: rightWidth,
             onDividerMousedown: onDividerMousedown,
@@ -1613,6 +1930,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             handleLeftUploadFileGroup: handleLeftUploadFileGroup,
             handlePathNavigate: handlePathNavigate,
             resetFocus: resetFocus,
+            searchGraph: searchGraph,
+            applyStatusFilter: applyStatusFilter,
+            applyLayoutMode: applyLayoutMode,
+            fitGraph: fitGraph,
+            zoomGraph: zoomGraph,
         };
     },
 });

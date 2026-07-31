@@ -87,6 +87,12 @@ const currentConversationId = ref("");
 
 const isLightRAGMode = ref(true);
 const expandedNodes = ref<Set<string>>(new Set());
+const graphSearch = ref("");
+const graphStatusFilter = ref<"all" | "correct" | "error" | "supplement">("all");
+const graphLayoutMode = ref<"auto" | LayoutType>("auto");
+const activeLayout = ref<LayoutType>("force");
+const isFocusMode = ref(false);
+const focusedNodeId = ref("");
 
 const leftWidth = ref(280);
 const rightWidth = ref(340);
@@ -578,13 +584,76 @@ async function initGraph() {
     if (!id) return;
     if (isLightRAGMode.value && !expandedNodes.value.has(id)) {
       void expandNodeNeighbors(id);
+    } else if (isFocusMode.value) {
+      void focusNode(id);
+      void showNodeDetail(id);
     } else {
       void showNodeDetail(id);
     }
   });
+  graph.on("node:pointerenter", (e: any) => {
+    const id = resolveNodeIdFromEvent(e);
+    if (!id || !graph) return;
+    const edgeIds = graphRawData.edges
+      .filter((edge) => edge.source === id || edge.target === id)
+      .map((edge) => edge.id || `${edge.source}-${edge.target}-${edge.label}`);
+    graph.setElementState(id, "highlight");
+    edgeIds.forEach((edgeId) => graph?.setElementState(edgeId, "highlight"));
+  });
+  graph.on("node:pointerleave", () => {
+    graph?.getData().nodes.forEach((node: any) => graph?.setElementState(node.id, []));
+    graph?.getData().edges.forEach((edge: any) => graph?.setElementState(edge.id, []));
+  });
   graph.on("canvas:click", () => {
     selectedNodeDetail.value = null;
   });
+}
+
+function graphDataForDisplay(data: GraphResponse): GraphResponse {
+  if (graphStatusFilter.value === "all") return data;
+  const nodes = data.nodes.filter((node) => node.status === graphStatusFilter.value);
+  const ids = new Set(nodes.map((node) => node.id));
+  return { nodes, edges: data.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)) };
+}
+
+function localFocusData(nodeId: string, depth = 2): GraphResponse {
+  const nodeIds = new Set([nodeId]);
+  for (let level = 0; level < depth; level++) {
+    graphRawData.edges.forEach((edge) => {
+      if (nodeIds.has(edge.source) || nodeIds.has(edge.target)) {
+        nodeIds.add(edge.source);
+        nodeIds.add(edge.target);
+      }
+    });
+  }
+  return {
+    nodes: graphRawData.nodes.filter((node) => nodeIds.has(node.id)),
+    edges: graphRawData.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)),
+  };
+}
+
+function preferredLayout(): LayoutType {
+  if (graphLayoutMode.value !== "auto") return graphLayoutMode.value;
+  return isNavigating.value || Boolean(selectedFileId.value) ? "dagre" : "force";
+}
+
+function prepareHierarchyData(data: GraphResponse): GraphResponse {
+  const dependencyPattern = /PREREQUISITE|DEPENDS|REQUIRES|PRECEDES|PARENT|IS_A|PART_OF/i;
+  const hierarchyEdges = data.edges.filter((edge) => dependencyPattern.test(edge.label || ""));
+  if (hierarchyEdges.length === 0) return data;
+
+  const supportingEdges = data.edges.filter((edge) =>
+    edge.status === "error" || edge.status === "supplement" || dependencyPattern.test(edge.label || ""),
+  );
+  const connected = new Set<string>();
+  supportingEdges.forEach((edge) => {
+    connected.add(edge.source);
+    connected.add(edge.target);
+  });
+  return {
+    nodes: data.nodes.filter((node) => connected.has(node.id)),
+    edges: supportingEdges,
+  };
 }
 
 async function renderGraph(
@@ -594,12 +663,15 @@ async function renderGraph(
   layoutType: LayoutType = "force",
 ) {
   if (!graph) return;
+  const selectedLayout = graphLayoutMode.value === "auto" ? layoutType : graphLayoutMode.value;
+  activeLayout.value = selectedLayout;
+  const visibleData = graphDataForDisplay(selectedLayout === "dagre" ? prepareHierarchyData(data) : data);
   const focusSet = focusMode ? buildFocusSet(pathData) : undefined;
-  const styled = buildStyledGraph(data, focusSet);
+  const styled = buildStyledGraph(visibleData, focusSet);
   graph.setLayout(
     styled.nodes.some((n: any) => n.x !== undefined)
       ? { type: "preset", padding: 50 }
-      : getLayoutConfig(layoutType),
+      : getLayoutConfig(selectedLayout),
   );
   graph.setData(styled as any);
   await graph.render();
@@ -813,7 +885,7 @@ async function handlePathNavigate() {
       hasRelated ? r.all_related! : graphRawData,
       true,
       hasRelated ? [r.all_related!] : r.paths,
-      "force",
+      "dagre",
     );
     if (r.dependency_tree?.length) {
       const g = await getLearningPath({
@@ -832,9 +904,55 @@ async function handlePathNavigate() {
 }
 
 async function resetFocus() {
+  isFocusMode.value = false;
+  focusedNodeId.value = "";
   await renderGraph(graphRawData, false, [], "force");
   isNavigating.value = false;
   statusText.value = "已退出专注模式";
+}
+
+async function focusNode(nodeId: string) {
+  const focused = localFocusData(nodeId);
+  isFocusMode.value = true;
+  focusedNodeId.value = nodeId;
+  await renderGraph(graphRawData, true, [focused], "force");
+  await (graph as any)?.focusElement?.(nodeId, { animation: { duration: 500 } });
+  statusText.value = `专注模式：${focused.nodes.length} 个相关知识点`;
+}
+
+async function searchGraph() {
+  const keyword = graphSearch.value.trim().toLowerCase();
+  if (!keyword) return;
+  const node = graphRawData.nodes.find((item) => (item.label || item.id).toLowerCase().includes(keyword));
+  if (!node) {
+    statusText.value = `未找到概念「${graphSearch.value.trim()}」`;
+    return;
+  }
+  await focusNode(node.id);
+  await showNodeDetail(node.id);
+}
+
+async function applyStatusFilter() {
+  await renderGraph(graphRawData, isFocusMode.value, isFocusMode.value ? [localFocusData(focusedNodeId.value)] : [], preferredLayout());
+  statusText.value = graphStatusFilter.value === "all" ? "已显示全部状态" : `已筛选：${graphStatusFilter.value}`;
+}
+
+async function applyLayoutMode() {
+  await renderGraph(
+    graphRawData,
+    isFocusMode.value,
+    isFocusMode.value && focusedNodeId.value ? [localFocusData(focusedNodeId.value)] : [],
+    preferredLayout(),
+  );
+  statusText.value = activeLayout.value === "dagre" ? "层级布局：前置知识从左向右排列" : "关系网络：按关联强度排列";
+}
+
+function fitGraph() {
+  void (graph as any)?.fitView?.({ when: "always", direction: "both" });
+}
+
+function zoomGraph(ratio: number) {
+  void (graph as any)?.zoomBy?.(ratio);
 }
 
 onMounted(async () => {
@@ -921,6 +1039,36 @@ onBeforeUnmount(() => {
 
       <div class="relative m-3 min-h-0 flex-1 overflow-hidden rounded-[18px] border border-gray-200 bg-white shadow-sm">
         <div ref="graphRoot" class="absolute inset-0" />
+
+        <div class="absolute left-4 top-4 z-20 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white/95 p-2 shadow-sm backdrop-blur">
+          <div class="flex h-9 items-center overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <input v-model="graphSearch" class="w-40 px-3 text-sm outline-none" placeholder="搜索概念…" @keyup.enter="searchGraph" />
+            <button class="h-full border-l border-slate-200 px-3 text-xs font-medium text-indigo-600 hover:bg-indigo-50" @click="searchGraph">定位</button>
+          </div>
+          <select v-model="graphStatusFilter" class="h-9 rounded-xl border border-slate-200 bg-white px-2 text-xs text-slate-600 outline-none" @change="applyStatusFilter">
+            <option value="all">全部状态</option>
+            <option value="correct">正确</option>
+            <option value="error">错误</option>
+            <option value="supplement">AI 补全</option>
+          </select>
+          <select v-model="graphLayoutMode" class="h-9 rounded-xl border border-slate-200 bg-white px-2 text-xs text-slate-600 outline-none" @change="applyLayoutMode">
+            <option value="auto">自动布局</option>
+            <option value="dagre">学习层级</option>
+            <option value="force">关系网络</option>
+          </select>
+          <button class="h-9 rounded-xl px-3 text-xs font-medium transition" :class="isFocusMode ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'" @click="isFocusMode ? resetFocus() : (isFocusMode = true)">
+            {{ isFocusMode ? "退出专注" : "专注模式" }}
+          </button>
+          <button class="h-9 rounded-xl bg-slate-100 px-3 text-xs text-slate-600 hover:bg-slate-200" @click="fitGraph">适应屏幕</button>
+          <button class="h-9 w-9 rounded-xl bg-slate-100 text-sm text-slate-600 hover:bg-slate-200" @click="zoomGraph(1.2)">＋</button>
+          <button class="h-9 w-9 rounded-xl bg-slate-100 text-sm text-slate-600 hover:bg-slate-200" @click="zoomGraph(0.8)">−</button>
+        </div>
+
+        <div class="absolute bottom-4 right-4 z-10 rounded-xl border border-slate-200 bg-white/90 px-3 py-2 text-[11px] text-slate-500 shadow-sm backdrop-blur">
+          <span class="mr-3"><i class="mr-1 inline-block h-2.5 w-2.5 rounded-full bg-blue-500" />正确</span>
+          <span class="mr-3"><i class="mr-1 inline-block h-2.5 w-2.5 rounded-full bg-red-500" />错误</span>
+          <span><i class="mr-1 inline-block h-2.5 w-2.5 rounded-full border border-dashed border-violet-600 bg-violet-100" />AI 补全</span>
+        </div>
 
         <div
           v-if="selectedNodeDetail"

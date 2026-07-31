@@ -175,12 +175,18 @@ const nodeStatusStyle: Record<
   }
 };
 
-function styleNode(node: GraphNode, dimmed: boolean) {
+function truncateLabel(label: string, maxLength = 12) {
+  const normalized = label.trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized;
+}
+
+function styleNode(node: GraphNode, dimmed: boolean, degree: number) {
   const preset = nodeStatusStyle[node.status ?? ""] ?? {
     fill: "#E2E8F0",
     stroke: "#64748B",
     lineWidth: 1.5
   };
+  const size = Math.min(64, 38 + Math.sqrt(Math.max(1, degree)) * 5);
 
   const safeData: Record<string, any> = { ...node };
   if (typeof safeData.type === "number") {
@@ -193,19 +199,21 @@ function styleNode(node: GraphNode, dimmed: boolean) {
     id: String(node.id),
     data: safeData,
     style: {
-      labelText: node.label || node.id,
+      size,
+      labelText: truncateLabel(node.label || node.id),
+      labelPlacement: "bottom",
+      labelOffsetY: 7,
       fill: preset.fill,
       stroke: preset.stroke,
-      lineWidth: preset.lineWidth,
+      lineWidth: degree >= 6 ? Math.max(2.5, preset.lineWidth) : preset.lineWidth,
       lineDash: preset.lineDash,
-      radius: 14,
-      opacity: dimmed ? 0.2 : 1,
-      labelFill: "#0F172A",
-      labelFontSize: 12,
-      labelFontWeight: 500,
-      halo: true,
+      opacity: dimmed ? 0.12 : 1,
+      labelFill: "#1E293B",
+      labelFontSize: degree >= 6 ? 12 : 11,
+      labelFontWeight: degree >= 6 ? 600 : 400,
+      halo: degree >= 6,
       haloLineWidth: 8,
-      haloStroke: "transparent"
+      haloStroke: preset.fill
     }
   };
 
@@ -236,14 +244,21 @@ function styleEdge(edge: GraphEdge, dimmed: boolean) {
     target: String(edge.target),
     data: safeData,
     style: {
-      labelText: edge.label,
-      labelFill: "#475569",
-      labelFontSize: 10,
-      stroke: isError ? "#DC2626" : isSupplement ? "#7C3AED" : "#94A3B8",
-      lineDash: isSupplement ? [8, 6] : undefined,
-      lineWidth: isError ? 2.5 : 1.4,
+      labelText: truncateLabel(edge.label || "关联", 16),
+      labelPlacement: "center",
+      labelFill: isError ? "#B91C1C" : isSupplement ? "#6D28D9" : "#64748B",
+      labelFontSize: 9,
+      labelBackground: true,
+      labelBackgroundFill: "#FFFFFF",
+      labelBackgroundFillOpacity: 0.86,
+      labelBackgroundRadius: 3,
+      labelBackgroundPadding: [1, 3],
+      stroke: isError ? "#DC2626" : isSupplement ? "#7C3AED" : "#CBD5E1",
+      lineDash: isSupplement ? [6, 5] : undefined,
+      lineWidth: isError ? 2 : 1,
       endArrow: true,
-      opacity: dimmed ? 0.2 : 0.9
+      endArrowSize: 5,
+      opacity: dimmed ? 0.06 : isError || isSupplement ? 0.75 : 0.55
     }
   };
 }
@@ -253,9 +268,15 @@ export function buildStyledGraph(
   focus?: { nodeIds: Set<string>; edgeIds: Set<string> }
 ): StyledGraphData {
   const hasFocus = Boolean(focus && (focus.nodeIds.size > 0 || focus.edgeIds.size > 0));
+  const degrees = new Map<string, number>();
+  graph.nodes.forEach((node) => degrees.set(node.id, 0));
+  graph.edges.forEach((edge) => {
+    degrees.set(edge.source, (degrees.get(edge.source) ?? 0) + 1);
+    degrees.set(edge.target, (degrees.get(edge.target) ?? 0) + 1);
+  });
 
   const nodes = graph.nodes.map((node) =>
-    styleNode(node, hasFocus ? !focus!.nodeIds.has(node.id) : false)
+    styleNode(node, hasFocus ? !focus!.nodeIds.has(node.id) : false, degrees.get(node.id) ?? 0)
   );
   const edges = graph.edges.map((edge) => {
     const edgeId = edge.id || `${edge.source}-${edge.target}-${edge.label}`;
@@ -289,17 +310,25 @@ export type LayoutType = "force" | "dagre";
  */
 export function getForceLayoutConfig() {
   return {
-    type: "force",
-    preventOverlap: true,
-    nodeSpacing: 120,        // 增大节点间距
-    nodeSize: 80,
-    linkDistance: 250,       // 增大边长度
-    nodeStrength: -1000,     // 适度斥力
-    edgeStrength: 0.1,       // 适度边引力
-    collideStrength: 1.5,    // 增大碰撞强度，增强防重叠
-    alphaDecay: 0.015,       // 减慢收敛速度，让布局更充分
-    maxIteration: 5000       // 增加迭代次数
-    // 注意：没有 center 和 gravity 配置，节点不会被吸引到中心
+    type: "d3-force",
+    link: {
+      distance: 150,
+      strength: 0.18
+    },
+    manyBody: {
+      strength: -900
+    },
+    collide: {
+      radius: 46,
+      strength: 1,
+      iterations: 4
+    },
+    center: {
+      strength: 0.06
+    },
+    alphaDecay: 0.025,
+    velocityDecay: 0.45,
+    maxIteration: 1800
   };
 }
 
@@ -324,11 +353,12 @@ export function getCollideLayoutConfig() {
 export function getDagreLayoutConfig() {
   return {
     type: "dagre",
-    rankdir: "TB",
+    rankdir: "LR",
     align: "UL",
-    nodesep: 60,
-    ranksep: 100,
-    controlPoints: true
+    nodesep: 54,
+    ranksep: 130,
+    controlPoints: true,
+    sortByCombo: false
   };
 }
 
@@ -363,18 +393,12 @@ export function getNodeConfig() {
  */
 export function getEdgeConfig() {
   return {
-    type: "polyline",
-    router: {
-      type: "orth",        // 正交路由算法
-      padding: 20,         // 增大绕开节点的边距
-      offset: 20,          // 折线偏移量
-      maxAllowedDirectionChange: 90,  // 限制转向角度
-      step: 10             // 路由步长，更精细的路径规划
-    },
+    type: "line",
     style: {
-      lineWidth: 1.4,
-      endArrow: true
-      // 注意：lineJoin 和 lineCap 在 G6 v5 中有特定类型要求，暂时移除
+      lineWidth: 1,
+      stroke: "#CBD5E1",
+      endArrow: true,
+      endArrowSize: 5
     }
   };
 }

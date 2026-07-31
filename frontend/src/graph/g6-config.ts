@@ -182,10 +182,16 @@ function styleNode(node: GraphNode, dimmed: boolean) {
     lineWidth: 1.5
   };
 
+  const safeData: Record<string, any> = { ...node };
+  if (typeof safeData.type === "number") {
+    safeData.nodeType = String(safeData.type);
+    delete safeData.type;
+  }
+
   // 如果节点有预计算位置（如扇形展开），保留它
   const result: any = {
-    id: node.id,
-    data: node,
+    id: String(node.id),
+    data: safeData,
     style: {
       labelText: node.label || node.id,
       fill: preset.fill,
@@ -218,11 +224,17 @@ function styleEdge(edge: GraphEdge, dimmed: boolean) {
   const isError = edge.status === "error";
   const isSupplement = edge.status === "supplement";
 
+  const safeData: Record<string, any> = { ...edge };
+  if (typeof safeData.type === "number") {
+    safeData.edgeType = String(safeData.type);
+    delete safeData.type;
+  }
+
   return {
-    id: edge.id || `${edge.source}-${edge.target}-${edge.label}`,
-    source: edge.source,
-    target: edge.target,
-    data: edge,
+    id: String(edge.id || `${edge.source}-${edge.target}-${edge.label}`),
+    source: String(edge.source),
+    target: String(edge.target),
+    data: safeData,
     style: {
       labelText: edge.label,
       labelFill: "#475569",

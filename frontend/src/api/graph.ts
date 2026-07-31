@@ -23,6 +23,7 @@ export interface GraphEdge {
   source: string;
   target: string;
   label: string;
+  confidence?: number;
   status?: "correct" | "error" | "supplement" | string;
   reason?: string;
   data?: Record<string, unknown>;

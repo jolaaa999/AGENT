@@ -67,6 +67,7 @@ const renameValue = ref("");
 const addFileToGroupTarget = ref("");
 const showLoginPrompt = ref(false);
 const isSwitching = ref(false);
+const isRefreshing = ref(false);
 
 const selectedNodeDetail = ref<{
   id: string;
@@ -192,7 +193,11 @@ function buildAIExplanation(
 function resolveNodeIdFromEvent(event: any): string {
   const c = [event?.data?.id, event?.target?.id, event?.target?.data?.id, event?.itemId];
   const h = c.find((v: any) => typeof v === "string" && v.trim().length > 0);
-  return h ? String(h) : "";
+  if (h) return String(h);
+
+  const raw = event?.target?.data ?? event?.data;
+  if (raw?.nodeType && typeof raw?.id !== "undefined") return String(raw.id);
+  return "";
 }
 
 async function handleLogin() {
@@ -211,22 +216,59 @@ async function handleLogin() {
       : `欢迎回来「${u}」，${files.value.length} 个文件、${fileGroups.value.length} 个文件组`;
 }
 
-async function loadFileList() {
+async function loadFileList(options?: { silent?: boolean }) {
   try {
     const r = await listUserFiles(currentUserId());
     files.value = r.files ?? [];
     fileGroups.value = r.file_groups ?? [];
-  } catch {
-    /* ignore */
+  } catch (err) {
+    if (!options?.silent) {
+      throw err;
+    }
+  }
+}
+
+async function handleRefresh() {
+  if (isRefreshing.value) return;
+
+  isRefreshing.value = true;
+  statusText.value = "正在刷新…";
+
+  try {
+    await loadFileList();
+
+    if (selectedFileId.value && !files.value.some((f) => f.id === selectedFileId.value)) {
+      selectedFileId.value = "";
+    }
+    if (selectedFileGroupId.value && !fileGroups.value.some((g) => g.id === selectedFileGroupId.value)) {
+      selectedFileGroupId.value = "";
+    }
+
+    await fetchAllGraph();
+
+    statusText.value = `已刷新：${files.value.length} 个文件、${fileGroups.value.length} 个文件组`;
+  } catch (err) {
+    statusText.value = `刷新失败：${(err as Error).message}`;
+  } finally {
+    isRefreshing.value = false;
   }
 }
 
 async function handleCreateGroup() {
-  if (!newGroupName.value.trim() || !requireLogin()) return;
+  const name = newGroupName.value.trim();
+  if (!name || !requireLogin()) return;
+  if (fileGroups.value.some((group) => group.name.trim().toLowerCase() === name.toLowerCase())) {
+    statusText.value = `文件组「${name}」已存在`;
+    return;
+  }
   try {
-    await createFileGroup(newGroupName.value.trim(), currentUserId());
+    const created = await createFileGroup(name, currentUserId());
     newGroupName.value = "";
     await loadFileList();
+    selectedFileGroupId.value = created.group_id;
+    selectedFileId.value = "";
+    menuOpen.value = "";
+    statusText.value = `已创建文件组「${name}」`;
   } catch (err) {
     statusText.value = `创建文件组失败：${(err as Error).message}`;
   }
@@ -244,11 +286,22 @@ async function handleDeleteFile(id: string) {
 }
 
 async function handleDeleteGroup(id: string) {
+  const group = fileGroups.value.find((item) => item.id === id);
+  const fileCount = files.value.filter((file) => file.file_group_id === id).length;
+  const message = fileCount
+    ? `确定删除文件组「${group?.name ?? id}」吗？组内 ${fileCount} 个文件也可能被删除。`
+    : `确定删除空文件组「${group?.name ?? id}」吗？`;
+  if (!window.confirm(message)) return;
   try {
     await deleteFileGroup(id, currentUserId());
-    if (selectedFileGroupId.value === id) selectedFileGroupId.value = "";
+    if (selectedFileGroupId.value === id) {
+      selectedFileGroupId.value = "";
+      graphRawData = { nodes: [], edges: [] };
+      await renderGraph(graphRawData);
+    }
     menuOpen.value = "";
     await loadFileList();
+    statusText.value = `已删除文件组「${group?.name ?? id}」`;
   } catch (err) {
     statusText.value = `删除失败：${(err as Error).message}`;
   }
@@ -287,14 +340,22 @@ async function handleTogglePin(type: "file" | "group", id: string) {
 }
 
 async function handleAddFileToGroup(fileId: string, groupId: string) {
+  const file = files.value.find((item) => item.id === fileId);
+  const group = fileGroups.value.find((item) => item.id === groupId);
+  if (file?.file_group_id === groupId) {
+    addFileToGroupTarget.value = "";
+    menuOpen.value = "";
+    statusText.value = `「${file.name}」已在该文件组中`;
+    return;
+  }
   try {
     await addFileToGroup(fileId, groupId, currentUserId());
     addFileToGroupTarget.value = "";
     menuOpen.value = "";
     await loadFileList();
-    statusText.value = "文件已加入文件组";
+    statusText.value = `已将「${file?.name ?? fileId}」移动到「${group?.name ?? groupId}」`;
   } catch (err) {
-    statusText.value = `加入文件组失败：${(err as Error).message}`;
+    statusText.value = `移动文件失败：${(err as Error).message}`;
   }
 }
 
@@ -302,46 +363,48 @@ async function selectFile(id: string) {
   selectedFileId.value = id;
   selectedFileGroupId.value = "";
   isSwitching.value = true;
-  await Promise.all([fetchGraphByFile(id), loadConversation(id, "")]);
-  isSwitching.value = false;
+  try {
+    await Promise.all([fetchGraphByFile(id), loadConversation(id, "")]);
+  } catch (err) {
+    statusText.value = `加载失败：${(err as Error).message}`;
+  } finally {
+    isSwitching.value = false;
+  }
 }
 
 async function selectFileGroup(id: string) {
   selectedFileGroupId.value = id;
   selectedFileId.value = "";
   isSwitching.value = true;
-  await Promise.all([fetchGraphByGroup(id), loadConversation("", id)]);
-  isSwitching.value = false;
+  try {
+    await Promise.all([fetchGraphByGroup(id), loadConversation("", id)]);
+  } catch (err) {
+    statusText.value = `加载失败：${(err as Error).message}`;
+  } finally {
+    isSwitching.value = false;
+  }
 }
 
 async function fetchGraphByFile(id: string) {
-  try {
-    const r = await getGraphAll({ file_id: id, user_id: currentUserId() });
-    graphRawData = preprocessGraphData(r.nodes, r.edges, {
-      minConfidence: 0.6,
-      removeSelfLoops: true,
-      keepIsolatedNodes: false,
-    });
-    await renderGraph(graphRawData);
-    statusText.value = `图谱：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线`;
-  } catch (err) {
-    statusText.value = `加载失败：${(err as Error).message}`;
-  }
+  const r = await getGraphAll({ file_id: id, user_id: currentUserId() });
+  graphRawData = preprocessGraphData(r.nodes, r.edges, {
+    minConfidence: 0.6,
+    removeSelfLoops: true,
+    keepIsolatedNodes: false,
+  });
+  await renderGraph(graphRawData);
+  statusText.value = `图谱：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线`;
 }
 
 async function fetchGraphByGroup(id: string) {
-  try {
-    const r = await getGraphAll({ file_group_id: id, user_id: currentUserId() });
-    graphRawData = preprocessGraphData(r.nodes, r.edges, {
-      minConfidence: 0.6,
-      removeSelfLoops: true,
-      keepIsolatedNodes: false,
-    });
-    await renderGraph(graphRawData);
-    statusText.value = `图谱：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线`;
-  } catch (err) {
-    statusText.value = `加载失败：${(err as Error).message}`;
-  }
+  const r = await getGraphAll({ file_group_id: id, user_id: currentUserId() });
+  graphRawData = preprocessGraphData(r.nodes, r.edges, {
+    minConfidence: 0.6,
+    removeSelfLoops: true,
+    keepIsolatedNodes: false,
+  });
+  await renderGraph(graphRawData);
+  statusText.value = `图谱：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线`;
 }
 
 async function loadConversation(fileId: string, fileGroupId: string) {
@@ -776,7 +839,7 @@ async function resetFocus() {
 
 onMounted(async () => {
   await initGraph();
-  await loadFileList();
+  await loadFileList({ silent: true });
   try {
     await fetchAllGraph();
   } catch {
@@ -812,6 +875,7 @@ onBeforeUnmount(() => {
       :file-groups="fileGroups"
       :selected-file-id="selectedFileId"
       :selected-file-group-id="selectedFileGroupId"
+      :is-refreshing="isRefreshing"
       @login-required="showLoginPrompt = true"
       @upload-file="handleLeftUploadFile"
       @upload-file-group="handleLeftUploadFileGroup"
@@ -823,7 +887,7 @@ onBeforeUnmount(() => {
       @delete-file="handleDeleteFile"
       @delete-group="handleDeleteGroup"
       @add-to-group="(id) => (addFileToGroupTarget = id)"
-      @refresh="loadFileList"
+      @refresh="handleRefresh"
     />
 
     <div
@@ -976,10 +1040,12 @@ onBeforeUnmount(() => {
             v-for="g in fileGroups"
             :key="g.id"
             type="button"
-            class="w-full rounded-xl px-3 py-2 text-left text-sm text-slate-700 hover:bg-violet-50"
+            :disabled="files.find((f) => f.id === addFileToGroupTarget)?.file_group_id === g.id"
+            class="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-slate-700 hover:bg-violet-50 disabled:cursor-default disabled:bg-slate-50 disabled:text-slate-400"
             @click="handleAddFileToGroup(addFileToGroupTarget, g.id)"
           >
-            {{ g.name }}
+            <span class="truncate">{{ g.name }}</span>
+            <span v-if="files.find((f) => f.id === addFileToGroupTarget)?.file_group_id === g.id" class="text-[12px]">当前</span>
           </button>
           <p v-if="fileGroups.length === 0" class="px-2 text-sm text-slate-400">暂无文件组</p>
         </div>

@@ -211,12 +211,13 @@ func (gc *GraphController) CreateFile(c *gin.Context) {
 	var req struct {
 		Name        string `json:"name" binding:"required"`
 		FileGroupID string `json:"file_group_id"`
+		UserID      string `json:"user_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
 		return
 	}
-	userID := gc.resolveUserID(c, "")
+	userID := gc.resolveUserID(c, req.UserID)
 	fileID, err := gc.service.CreateFile(c.Request.Context(), userID, req.Name, req.FileGroupID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create file", "detail": err.Error()})
@@ -227,13 +228,14 @@ func (gc *GraphController) CreateFile(c *gin.Context) {
 
 func (gc *GraphController) CreateFileGroup(c *gin.Context) {
 	var req struct {
-		Name string `json:"name" binding:"required"`
+		Name   string `json:"name" binding:"required"`
+		UserID string `json:"user_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
 		return
 	}
-	userID := gc.resolveUserID(c, "")
+	userID := gc.resolveUserID(c, req.UserID)
 	groupID, err := gc.service.CreateFileGroup(c.Request.Context(), userID, req.Name)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create file group", "detail": err.Error()})
@@ -276,12 +278,13 @@ func (gc *GraphController) RenameFile(c *gin.Context) {
 	var req struct {
 		FileID  string `json:"file_id" binding:"required"`
 		NewName string `json:"new_name" binding:"required"`
+		UserID  string `json:"user_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
 		return
 	}
-	userID := gc.resolveUserID(c, "")
+	userID := gc.resolveUserID(c, req.UserID)
 	if err := gc.service.RenameFile(c.Request.Context(), userID, req.FileID, req.NewName); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename file", "detail": err.Error()})
 		return
@@ -293,12 +296,13 @@ func (gc *GraphController) RenameFileGroup(c *gin.Context) {
 	var req struct {
 		GroupID string `json:"group_id" binding:"required"`
 		NewName string `json:"new_name" binding:"required"`
+		UserID  string `json:"user_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
 		return
 	}
-	userID := gc.resolveUserID(c, "")
+	userID := gc.resolveUserID(c, req.UserID)
 	if err := gc.service.RenameFileGroup(c.Request.Context(), userID, req.GroupID, req.NewName); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename file group", "detail": err.Error()})
 		return
@@ -310,12 +314,13 @@ func (gc *GraphController) AddFileToGroup(c *gin.Context) {
 	var req struct {
 		FileID  string `json:"file_id" binding:"required"`
 		GroupID string `json:"group_id" binding:"required"`
+		UserID  string `json:"user_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "detail": err.Error()})
 		return
 	}
-	userID := gc.resolveUserID(c, "")
+	userID := gc.resolveUserID(c, req.UserID)
 	if err := gc.service.AddFileToGroup(c.Request.Context(), userID, req.FileID, req.GroupID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add file to group", "detail": err.Error()})
 		return

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { Graph } from "@antv/g6";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from "vue";
 import { marked } from "marked";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import {
   addFileToGroup,
   chatWithContext,
@@ -10,7 +12,9 @@ import {
   deleteFile,
   deleteFileGroup,
   explainConcept,
+  extractToMarkdown,
   getConversation,
+  getFilesMarkdown,
   getGraphAll,
   getGraphPath,
   getLearningPath,
@@ -19,9 +23,11 @@ import {
   renameFile,
   renameFileGroup,
   saveMessage,
+  syncFileToWorkspace,
   togglePinFile,
   togglePinFileGroup,
   uploadNoteLangChain,
+  updateFileContent,
   type FileGroup,
   type GraphResponse,
   type UserFile,
@@ -39,22 +45,94 @@ import FileSidebar from "../components/FileSidebar.vue";
 import ImportPanel from "../components/ImportPanel.vue";
 import LearningNavPanel from "../components/LearningNavPanel.vue";
 import AiChatPanel from "../components/AiChatPanel.vue";
+import WorkspacePanel from "../components/WorkspacePanel.vue";
+import ToastStack, { type ToastItem } from "../components/ToastStack.vue";
+import SidebarRail, { type RailItem } from "../components/SidebarRail.vue";
+import { PanelRightClose, FolderTree, FileUp, Compass, MessageSquare, FolderOpen, RefreshCw } from "lucide-vue-next";
 
+/**
+ * 渲染 LaTeX 片段为 HTML。
+ * 失败时回退为原始文本，确保公式语法错误不会让整条消息渲染不出来。
+ */
+function renderLatex(tex: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(tex, {
+      displayMode,
+      throwOnError: false,
+      strict: false,
+      output: "html",
+    });
+  } catch {
+    return `<code>${tex.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string))}</code>`;
+  }
+}
+
+/**
+ * 渲染 Markdown 并支持 LaTeX 数学公式。
+ *
+ * 顺序很关键：必须先抽出数学片段并占位，再做 Markdown 解析，
+ * 否则公式里的 `_`、`*`、`\\` 会被 markdown 当成强调/转义符，导致公式损坏。
+ * 解析完成后再把占位符替换回 KaTeX 渲染结果。
+ *
+ * 支持：$$...$$（块级）、\[...\]（块级）、$...$（行内）、\(...\)（行内）。
+ */
 function renderMarkdown(text: string): string {
   if (!text) return "";
-  return marked.parse(text, { breaks: true }) as string;
+
+  const mathFragments: string[] = [];
+
+  // 占位符使用不含 markdown 特殊字符的标记
+  const stash = (tex: string, displayMode: boolean) => {
+    const idx = mathFragments.length;
+    mathFragments.push(renderLatex(tex, displayMode));
+    return `\u0000MATH${idx}\u0000`;
+  };
+
+  let src = text;
+
+  // 1) 块级公式：$$...$$ 与 \[...\]
+  src = src.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex) => stash(tex.trim(), true));
+  src = src.replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex) => stash(tex.trim(), true));
+
+  // 2) 行内公式：$...$ 与 \(...\)
+  //    排除 $$ 的情况，且要求 $ 前后不是数字，避免误伤「$5 到 $10」这类金额
+  src = src.replace(/(?<!\$)\$(?!\s)([^\n$]+?)(?<!\s)\$(?!\$)/g, (m, tex, offset, whole) => {
+    const prev = offset > 0 ? whole[offset - 1] : "";
+    const next = whole[offset + m.length] ?? "";
+    if (/[0-9]/.test(prev) || /[0-9]/.test(next)) return m;
+    return stash(tex.trim(), false);
+  });
+  src = src.replace(/\\\(([\s\S]+?)\\\)/g, (_m, tex) => stash(tex.trim(), false));
+
+  // 3) Markdown 解析
+  let html = marked.parse(src, { breaks: true }) as string;
+
+  // 4) 还原公式。Markdown 可能把 \u0000MATH0\u0000 包进 <p> 里，直接字符串替换即可
+  html = html.replace(/\u0000MATH(\d+)\u0000/g, (_m, i) => mathFragments[Number(i)] ?? "");
+
+  return html;
 }
 
 const markdown = ref("");
 const concept = ref("");
 const userId = ref("");
-const loggedInUserId = ref("");
+const LOGGED_IN_USER_STORAGE_KEY = "learning_graph_user_id";
+const loggedInUserId = ref(localStorage.getItem(LOGGED_IN_USER_STORAGE_KEY) || "");
 const maxDepth = ref(3);
+
+// 深度上限，必须与后端 repository.graph_repository.go 里的
+// maxPathDepthLimit（当前为 6）保持一致。
+//
+// 这里原先是 12，但后端硬上限是 6：用户把深度拉到 7~12 时后端会静默按 6 算，
+// 界面上却毫无提示（因为后端当时也没有回传 meta）。现在两边对齐为 6，
+// 用户根本选不到会被截断的值；同时后端已回传 meta，双保险。
+const MAX_PATH_DEPTH_LIMIT = 6;
 const isLoading = ref(false);
 const isNavigating = ref(false);
 const statusText = ref("图谱待生成");
 const importedFileName = ref("");
 const graphRoot = ref<HTMLDivElement | null>(null);
+const graphCanvas = ref<HTMLDivElement | null>(null);
 const selectedFileId = ref("");
 const selectedFileGroupId = ref("");
 
@@ -94,7 +172,57 @@ const activeLayout = ref<LayoutType>("force");
 const isFocusMode = ref(false);
 const focusedNodeId = ref("");
 
+// ==================== 侧栏折叠 ====================
+// 折叠后侧栏变成一列图标（SidebarRail），保留功能入口。
+// 两处触发：手动点折叠按钮、拖拽到小于阈值时自动折叠。
+const COLLAPSE_THRESHOLD = 160; // 拖拽窄于此值自动折叠
+const COLLAPSED_WIDTH = 56;     // 图标栏宽度（w-14 = 3.5rem = 56px）
+
+const leftCollapsed = ref(false);
+const rightCollapsed = ref(false);
+
+// 折叠状态持久化，刷新后保持一致
+try {
+  leftCollapsed.value = localStorage.getItem("lg.leftCollapsed") === "1";
+  rightCollapsed.value = localStorage.getItem("lg.rightCollapsed") === "1";
+} catch {
+  /* localStorage 不可用时忽略，用默认展开态 */
+}
+watch(leftCollapsed, (v) => {
+  try { localStorage.setItem("lg.leftCollapsed", v ? "1" : "0"); } catch {}
+});
+watch(rightCollapsed, (v) => {
+  try { localStorage.setItem("lg.rightCollapsed", v ? "1" : "0"); } catch {}
+});
+
+// 展开时定位到的面板（图标点击后高亮 / 滚动）
+// 面板锚点：点击图标展开后滚动到对应面板
+const importPanelEl = ref<HTMLElement | null>(null);
+const navPanelEl = ref<HTMLElement | null>(null);
+const chatPanelEl = ref<HTMLElement | null>(null);
+const workspacePanelEl = ref<HTMLElement | null>(null);
+
+// 折叠态图标项：只放功能入口，点击后展开并定位
+const leftRailItems = computed<RailItem[]>(() => [
+  { key: "upload", label: "上传笔记", icon: FileUp },
+  { key: "refresh", label: "刷新文件列表", icon: RefreshCw },
+  { key: "groups", label: "文件组", icon: FolderTree },
+]);
+
+const rightRailItems = computed<RailItem[]>(() => [
+  { key: "import", label: "导入学习笔记", icon: FileUp },
+  { key: "nav", label: "逆向学习导航", icon: Compass },
+  { key: "chat", label: "AI 学习导师", icon: MessageSquare },
+  { key: "workspace", label: "AI 工作区", icon: FolderOpen },
+]);
+
+const leftRailUploadInput = ref<HTMLInputElement | null>(null);
+
+const leftActivePanel = ref("");
+const rightActivePanel = ref("");
+
 const leftWidth = ref(280);
+const rightWidthSaved = ref(340);
 const rightWidth = ref(340);
 const dragging = ref<"left" | "right" | null>(null);
 
@@ -107,12 +235,27 @@ function onDividerMousedown(side: "left" | "right", e: MouseEvent) {
 
 function onDividerMousemove(e: MouseEvent) {
   if (!dragging.value) return;
-  const minW = 200;
+  const collapseAt = COLLAPSE_THRESHOLD;
   const maxW = 480;
+
   if (dragging.value === "left") {
-    leftWidth.value = Math.min(maxW, Math.max(minW, e.clientX));
+    const raw = e.clientX;
+    // 拖到很窄时自动折叠，并停止继续变窄（避免出现 10px 的畸形宽度）
+    if (raw < collapseAt) {
+      leftCollapsed.value = true;
+      return;
+    }
+    leftCollapsed.value = false;
+    leftWidth.value = Math.min(maxW, raw);
   } else {
-    rightWidth.value = Math.min(maxW, Math.max(minW, window.innerWidth - e.clientX));
+    const raw = window.innerWidth - e.clientX;
+    if (raw < collapseAt) {
+      rightCollapsed.value = true;
+      return;
+    }
+    rightCollapsed.value = false;
+    rightWidth.value = Math.min(maxW, raw);
+    rightWidthSaved.value = rightWidth.value;
   }
 }
 
@@ -124,11 +267,82 @@ function onDividerMouseup() {
   resizeGraph();
 }
 
+/** 展开某一侧侧栏，并把视图滚动到指定面板 */
+async function expandSidebar(side: "left" | "right", panelKey = "") {
+  if (side === "left") {
+    leftCollapsed.value = false;
+    leftActivePanel.value = panelKey;
+  } else {
+    rightCollapsed.value = false;
+    rightWidth.value = rightWidthSaved.value || 340;
+    rightActivePanel.value = panelKey;
+  }
+  await nextTick();
+  // 展开后把对应面板滚动到可见位置（右侧内容可能很长）
+  if (side === "right" && panelKey) {
+    const map: Record<string, HTMLElement | null> = {
+      import: importPanelEl.value,
+      nav: navPanelEl.value,
+      chat: chatPanelEl.value,
+      workspace: document.querySelector('[data-panel="workspace"]'),
+    };
+    map[panelKey]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  // 侧栏宽度变化后图谱需要重新适配
+  resizeGraph();
+}
+
+/** 折叠态图标点击：先把侧栏展开，再执行该图标对应的动作 */
+async function handleLeftRailSelect(key: string) {
+  await expandSidebar("left", key);
+  if (key === "upload") {
+    leftRailUploadInput.value?.click();
+  } else if (key === "refresh") {
+    await handleRefresh();
+  }
+  // groups 仅展开，滚动定位交给 expandSidebar
+}
+
+function collapseSidebar(side: "left" | "right") {
+  if (side === "left") leftCollapsed.value = true;
+  else rightCollapsed.value = true;
+  resizeGraph();
+}
+
+/**
+ * 确保容器尺寸变化能同步到图实例。
+ *
+ * 必须可重复调用：graph.destroy() 会让 G6 重新创建画布 DOM，
+ * 而 ResizeObserver 的观察目标/回调绑定的是旧引用，重建后不再生效，
+ * 于是容器变高变宽时画布仍停在旧尺寸 —— 表现为「画布下面一半白屏」。
+ * 因此每次重建图之后都要重新挂载一次。
+ */
+function ensureResizeObserver() {
+  resizeObserver?.disconnect();
+  if (!graphRoot.value) return;
+  resizeObserver = new ResizeObserver((entries) => {
+    const r = entries[0];
+    if (!r || !graph) return;
+    const w = r.contentRect.width;
+    const h = r.contentRect.height;
+    if (w <= 0 || h <= 0) return;
+    // resize 会重置画布尺寸（内容被清掉），因此 resize 之后必须重绘一次，
+    // 否则折叠/展开侧栏后画布会变成一片空白。
+    graph.resize(w, h);
+    void graph.draw();
+  });
+  resizeObserver.observe(graphRoot.value);
+}
+
 function resizeGraph() {
   requestAnimationFrame(() => {
     if (graphRoot.value && graph) {
       const r = graphRoot.value.getBoundingClientRect();
-      graph.resize(r.width, r.height);
+      if (r.width > 0 && r.height > 0) {
+        graph.resize(Math.round(r.width), Math.round(r.height));
+        // 同 ensureResizeObserver：resize 后需要重绘，否则内容消失
+        void graph.draw();
+      }
     }
   });
 }
@@ -142,6 +356,43 @@ let resizeObserver: ResizeObserver | null = null;
 
 const canGenerate = computed(() => markdown.value.trim().length > 0);
 const canNavigate = computed(() => concept.value.trim().length > 0);
+
+/** AI 工作区面板引用（用于在文件变动后刷新其列表） */
+const workspacePanelRef = ref<InstanceType<typeof WorkspacePanel> | null>(null);
+
+// ==================== 轻提示（toast） ====================
+
+const toasts = ref<ToastItem[]>([]);
+let toastSeq = 0;
+const toastTimers = new Map<number, number>();
+
+/**
+ * 弹出一条会自动淡出的提示。
+ *
+ * 用于「查询未命中」「深度被截断」这类只需告知、不需要用户决策的信息；
+ * 因此不阻塞操作，到时间自动消失（也允许手动关闭）。
+ */
+function pushToast(message: string, type: ToastItem["type"] = "info", detail = "", duration = 4200) {
+  const id = ++toastSeq;
+  toasts.value = [...toasts.value, { id, message, type, detail }];
+
+  const timer = window.setTimeout(() => dismissToast(id), duration);
+  toastTimers.set(id, timer);
+}
+
+function dismissToast(id: number) {
+  const timer = toastTimers.get(id);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    toastTimers.delete(id);
+  }
+  toasts.value = toasts.value.filter((t) => t.id !== id);
+}
+
+onUnmounted(() => {
+  toastTimers.forEach((t) => window.clearTimeout(t));
+  toastTimers.clear();
+});
 
 function currentUserId(): string | undefined {
   return loggedInUserId.value || undefined;
@@ -210,6 +461,7 @@ async function handleLogin() {
   const u = userId.value.trim();
   if (!u) return;
   loggedInUserId.value = u;
+  localStorage.setItem(LOGGED_IN_USER_STORAGE_KEY, u);
   selectedFileId.value = "";
   selectedFileGroupId.value = "";
   chatMessages.value = [];
@@ -220,6 +472,20 @@ async function handleLogin() {
     files.value.length === 0 && fileGroups.value.length === 0
       ? `新用户「${u}」已创建，上传 MD 文件开始使用`
       : `欢迎回来「${u}」，${files.value.length} 个文件、${fileGroups.value.length} 个文件组`;
+}
+
+async function handleLogout() {
+  loggedInUserId.value = "";
+  localStorage.removeItem(LOGGED_IN_USER_STORAGE_KEY);
+  userId.value = "";
+  selectedFileId.value = "";
+  selectedFileGroupId.value = "";
+  chatMessages.value = [];
+  currentConversationId.value = "";
+  graphRawData = { nodes: [], edges: [] };
+  await renderGraph(graphRawData, false, [], "force");
+  await loadFileList();
+  statusText.value = "已退出登录";
 }
 
 async function loadFileList(options?: { silent?: boolean }) {
@@ -413,8 +679,67 @@ async function fetchGraphByGroup(id: string) {
   statusText.value = `图谱：${graphRawData.nodes.length} 节点 / ${graphRawData.edges.length} 连线`;
 }
 
-async function loadConversation(fileId: string, fileGroupId: string) {
+/**
+ * 把 AI 修改后的正文回写到当前文件。
+ *
+ * AI 的编辑能力只作用于「文档文本」这一层：原文档在浏览器里，改完若不回写，
+ * 刷新后就丢了。这里把结果持久化到该文件节点，使修改真正落地；
+ * 全图作用域下没有归属文件，则只保留在编辑框（提示用户先生成图谱）。
+ */
+async function persistEditedMarkdown(content: string): Promise<void> {
+  const targetFileId = selectedFileId.value;
+  if (!targetFileId) {
+    statusText.value = "AI 已修改文档草稿；保存到文件前请先选择或生成一个文件";
+    return;
+  }
   try {
+    await updateFileContent(targetFileId, content, currentUserId());
+    statusText.value = "AI 已修改文档并保存到该文件，可点击生成图谱查看更新";
+    // 同步进工作区，这样用户能在「AI 工作区」里直接下载改后的文件
+    await handleSyncFileToWorkspace(targetFileId, true);
+  } catch (err) {
+    statusText.value = `文档已修改，但保存失败：${(err as Error).message}`;
+  }
+}
+
+/**
+ * 把某个已入库文件同步进 AI 工作区，使 AI 能像操作真实文件一样读写它。
+ *
+ * @param silent 为 true 时不改变状态栏文案（用于自动同步的静默场景）
+ */
+async function handleSyncFileToWorkspace(fileId: string, silent = false): Promise<void> {
+  if (!fileId) return;
+  try {
+    const r = await syncFileToWorkspace(fileId, currentUserId());
+    statusText.value = `已将「${r.path}」同步到 AI 工作区，可在下方下载`;
+    if (!silent) {
+      pushToast(`已同步「${r.path}」到工作区`, "info", "可在 AI 工作区中预览或下载。");
+    }
+    await workspacePanelRef.value?.refresh();
+  } catch (err) {
+    // 同步失败必须给用户可见反馈。
+    // 之前只写 statusText，而它显示在图谱顶栏、离工作区很远，
+    // 用户点了下拉框却「什么都没发生」——其实请求已发出并被拒绝。
+    const raw = (err as Error).message;
+    let hint = raw;
+    try {
+      const parsed = JSON.parse(raw);
+      hint = parsed.error || raw;
+    } catch {
+      // 非 JSON，直接用原文
+    }
+    statusText.value = `同步到工作区失败：${hint}`;
+    if (!silent) {
+      // 针对最常见的原因（旧文件没有存正文）给出可执行的建议
+      const detail = hint.includes("no content")
+        ? "该文件是在「正文存储」功能上线前上传的，云端没有保存它的内容。请重新上传该笔记，之后再同步。"
+        : hint;
+      pushToast("同步到工作区失败", "error", detail, 8000);
+    }
+  }
+}
+
+async function loadConversation(fileId: string, fileGroupId: string) {  try {
     const c = await getConversation({
       file_id: fileId || undefined,
       file_group_id: fileGroupId || undefined,
@@ -445,20 +770,28 @@ async function handleClearConversation() {
 async function sendChatMessage(imageBase64 = "") {
   const msg = chatInput.value.trim();
   if ((!msg && !imageBase64) || isChatting.value) return;
-  chatMessages.value.push({ role: "user", content: msg || "[图片]" });
+  const userContent = msg || "[图片]";
+  chatMessages.value.push({ role: "user", content: userContent });
   chatInput.value = "";
   isChatting.value = true;
-  if (!currentConversationId.value) {
-    await loadConversation(selectedFileId.value, selectedFileGroupId.value);
-  }
-  saveMessage({
-    conversation_id: currentConversationId.value,
-    file_id: selectedFileId.value || undefined,
-    file_group_id: selectedFileGroupId.value || undefined,
-    role: "user",
-    content: msg || "[图片]",
-  }).catch(() => {});
   try {
+    // 需要先确保拿到 conversation_id 才能落库。
+    // loadConversation 会用数据库内容整体替换 chatMessages，
+    // 因此先记下当前本地消息，替换后再把刚发出的这条补回去，
+    // 避免「发送后消息消失、等 AI 回复才出现」的空白现象。
+    if (!currentConversationId.value) {
+      const localPending = chatMessages.value.slice();
+      await loadConversation(selectedFileId.value, selectedFileGroupId.value);
+      chatMessages.value = localPending;
+    }
+    saveMessage({
+      conversation_id: currentConversationId.value,
+      file_id: selectedFileId.value || undefined,
+      file_group_id: selectedFileGroupId.value || undefined,
+      role: "user",
+      content: userContent,
+    }).catch(() => {});
+
     const gn = JSON.stringify(
       graphRawData.nodes.map((n) => ({
         name: n.label || n.id,
@@ -476,10 +809,28 @@ async function sendChatMessage(imageBase64 = "") {
         reason: e.reason,
       })),
     );
+    // 对话上下文按当前作用域取：
+    // - 文件组 → 聚合组内所有文件的正文（而不是编辑框里那一份）
+    // - 单个文件 → 该文件正文
+    // - 全图 → 退回编辑框内容
+    // 取不到时静默回退，保证对话不因上下文缺失而失败。
+    let contextMarkdown = markdown.value;
+    if (selectedFileGroupId.value || selectedFileId.value) {
+      try {
+        const res = await getFilesMarkdown({
+          file_id: selectedFileId.value || undefined,
+          file_group_id: selectedFileGroupId.value || undefined,
+          user_id: currentUserId(),
+        });
+        if (res.markdown.trim()) contextMarkdown = res.markdown;
+      } catch {
+        /* 回退到编辑框内容 */
+      }
+    }
     const r = await chatWithContext({
       user_message: msg || "请分析这张图片",
       conversation_id: currentConversationId.value,
-      markdown: markdown.value,
+      markdown: contextMarkdown,
       graph_nodes: gn,
       graph_edges: ge,
       image_base64: imageBase64,
@@ -495,6 +846,7 @@ async function sendChatMessage(imageBase64 = "") {
     if (r.edited_markdown) {
       markdown.value = r.edited_markdown;
       statusText.value = "AI 已修改文档，可点击生成图谱查看更新";
+      await persistEditedMarkdown(r.edited_markdown);
     }
   } catch (err) {
     chatMessages.value.push({ role: "ai", content: `对话出错：${(err as Error).message}` });
@@ -553,13 +905,22 @@ async function showNodeDetail(nodeId: string) {
 }
 
 async function initGraph() {
-  if (!graphRoot.value) return;
-  const { width, height } = graphRoot.value.getBoundingClientRect();
+  const host = graphCanvas.value;
+  const measureEl = graphRoot.value;
+  if (!host || !measureEl) return;
+  const rect = measureEl.getBoundingClientRect();
+  const width = Math.max(Math.round(rect.width), 1);
+  const height = Math.max(Math.round(rect.height), 1);
+  // 清掉上一次实例可能残留的 DOM（G6 destroy 不保证移除全部画布）
+  host.replaceChildren();
   graph = new Graph({
-    container: graphRoot.value,
+    container: host,
     width,
     height,
     autoFit: "view",
+    // fitView / autoFit 计算缩放时会把 padding 作为四周留白内缩掉。
+    // 默认是 0，会让适配后的内容顶满画布、节点与标签贴着边框（看起来像被裁掉）。
+    padding: 64,
     data: { nodes: [], edges: [] },
     node: getNodeConfig(),
     edge: getEdgeConfig(),
@@ -578,7 +939,10 @@ async function initGraph() {
       },
     ],
   });
-  await graph.render();
+  // 注意：这里不 await render()。
+  // 空的 force 布局 render 在 G6 v5 下可能不 resolve，await 会把
+  // onMounted / fetchAllGraph 整条链路卡死（表现为一直「加载中…」）。
+  // 真正有数据的 render 由 renderGraph 负责并 await。
   graph.on("node:click", (e: any) => {
     const id = resolveNodeIdFromEvent(e);
     if (!id) return;
@@ -591,22 +955,72 @@ async function initGraph() {
       void showNodeDetail(id);
     }
   });
+  // 悬停高亮。
+  //
+  // 注意：必须只操作「当前图上真实存在的元素」。
+  // graphRawData 保存的是完整数据，而画面可能被状态筛选、专注模式等过滤过，
+  // 直接遍历 graphRawData 会拿被过滤掉的 id 去调 setElementState，
+  // G6 内部会走 getNode(id) 并抛 "Node not found for id: xxx"。
   graph.on("node:pointerenter", (e: any) => {
     const id = resolveNodeIdFromEvent(e);
     if (!id || !graph) return;
-    const edgeIds = graphRawData.edges
-      .filter((edge) => edge.source === id || edge.target === id)
-      .map((edge) => edge.id || `${edge.source}-${edge.target}-${edge.label}`);
-    graph.setElementState(id, "highlight");
-    edgeIds.forEach((edgeId) => graph?.setElementState(edgeId, "highlight"));
+    const live = liveGraphData();
+    if (!live) return;
+    const nodeIds = new Set(live.nodes.map((n: any) => n.id));
+    if (!nodeIds.has(id)) return;
+    applyElementState(id, "highlight");
+    live.edges
+      .filter((edge: any) => edge.source === id || edge.target === id)
+      .forEach((edge: any) => {
+        const edgeId = edge.id || `${edge.source}-${edge.target}-${edge.label}`;
+        applyElementState(edgeId, "highlight");
+      });
   });
   graph.on("node:pointerleave", () => {
-    graph?.getData().nodes.forEach((node: any) => graph?.setElementState(node.id, []));
-    graph?.getData().edges.forEach((edge: any) => graph?.setElementState(edge.id, []));
+    const live = liveGraphData();
+    if (!live) return;
+    live.nodes.forEach((node: any) => applyElementState(node.id, []));
+    live.edges.forEach((edge: any) => {
+      const edgeId = edge.id || `${edge.source}-${edge.target}-${edge.label}`;
+      applyElementState(edgeId, []);
+    });
   });
   graph.on("canvas:click", () => {
     selectedNodeDetail.value = null;
   });
+}
+
+/**
+ * 取「当前画布上真实存在的」图数据。
+ *
+ * graphRawData 是完整数据集，而画布内容会被状态筛选、专注模式等裁剪。
+ * 任何要按 id 操作画布元素的地方（高亮、定位、缩放）都应基于这份数据，
+ * 否则会拿到已被过滤掉的 id，触发 G6 的 "Node not found for id"。
+ */
+function liveGraphData(): { nodes: any[]; edges: any[] } | null {
+  if (!graph) return null;
+  const d = graph.getData() as unknown as { nodes?: any[]; edges?: any[] };
+  if (!d) return null;
+  return { nodes: d.nodes ?? [], edges: d.edges ?? [] };
+}
+
+/**
+ * 安全地设置元素状态。
+ * 元素不存在时静默跳过——画布数据在重渲染间隔里可能已经变了，
+ * 这里不该因为一个过期 id 就中断整段逻辑。
+ */
+function applyElementState(id: string, state: string | string[]) {
+  if (!graph || !id) return;
+  const live = liveGraphData();
+  if (!live) return;
+  const exists =
+    live.nodes.some((n: any) => n.id === id) || live.edges.some((e: any) => e.id === id);
+  if (!exists) return;
+  try {
+    graph.setElementState(id, state as any);
+  } catch {
+    // G6 内部仍可能因并发重渲染抛错，忽略即可，不影响主流程
+  }
 }
 
 function graphDataForDisplay(data: GraphResponse): GraphResponse {
@@ -656,6 +1070,9 @@ function prepareHierarchyData(data: GraphResponse): GraphResponse {
   };
 }
 
+/** 上一次渲染的节点 id 集合指纹，用于判断数据集是否真的换了 */
+let lastRenderedNodeKey = "";
+
 async function renderGraph(
   data: GraphResponse,
   focusMode = false,
@@ -668,13 +1085,106 @@ async function renderGraph(
   const visibleData = graphDataForDisplay(selectedLayout === "dagre" ? prepareHierarchyData(data) : data);
   const focusSet = focusMode ? buildFocusSet(pathData) : undefined;
   const styled = buildStyledGraph(visibleData, focusSet);
-  graph.setLayout(
-    styled.nodes.some((n: any) => n.x !== undefined)
-      ? { type: "preset", padding: 50 }
-      : getLayoutConfig(selectedLayout),
-  );
+
+  // 切换文件 / 文件组时是一份全新的数据集，必须让布局从头算一遍。
+  //
+  // 之前这里在「有任一节点带 x/y」时就用 preset 布局。但 G6 v5 的 setData
+  // 会把上一批节点的坐标残留在画布上，新数据集的节点 id 与旧的毫无关系，
+  // 于是所有新节点都落在残留坐标（多半是同一个点或原图位置）上，表现为
+  // 「节点重叠在一起」。只有确实存在预计算坐标（扇形展开等）时才该用 preset，
+  // 而那种情况必须保证「所有」节点都有坐标。
+  const allHavePosition =
+    styled.nodes.length > 0 && styled.nodes.every((n: any) => n.x !== undefined && n.y !== undefined);
+
+  // 数据集变化时先把画布清空，再灌入新数据。
+  //
+  // 为什么不清空而直接 setData：G6 v5 的 setData 会保留上一批节点的坐标，
+  // 新旧数据集节点 id 毫无关系，新节点就会全部堆在残留坐标上（节点重叠）。
+  // 清空这一步必须在同一个实例上同步完成，不能 destroy 后重建 ——
+  // 重建会让布局/交互相的异步任务拿着旧 id 继续跑并抛
+  // "Unknown element type of id"，且重建过程中的 render 可能不 resolve。
+  const incomingIds = styled.nodes.map((n: any) => n.id).sort().join("|");
+  const datasetChanged = incomingIds !== lastRenderedNodeKey;
+  lastRenderedNodeKey = incomingIds;
+
+  // 切换数据集时，上一轮的力导向布局可能仍在跑（maxIteration 1800）。
+  // 它会拿旧数据集的 id 去写坐标，此时模型里已没有这些 id，
+  // G6 内部 getNode(id) 就会抛 "Node not found for id: xxx" 并刷屏。
+  // 先停掉布局，再灌入新数据，最后才重新布局 —— 顺序不能颠倒。
+  if (datasetChanged) {
+    try {
+      graph.stopLayout();
+    } catch {
+      // 布局尚未启动时 stop 可能抛错，忽略
+    }
+    // 清空模型，确保随后 setData 不会与残留元素混在一起
+    try {
+      graph.setData({ nodes: [], edges: [] } as any);
+    } catch {
+      // 忽略清空失败
+    }
+    // 让被中断的渲染任务先落地，避免与下面的 setData 竞争
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+  }
+
+  graph.setLayout(allHavePosition ? { type: "preset", padding: 50 } : getLayoutConfig(selectedLayout));
   graph.setData(styled as any);
-  await graph.render();
+
+  // 不要 await render()。
+  //
+  // d3-force 在「动画模式」下用 setInterval(0) 逐帧迭代，要跑满 maxIteration
+  // 次才触发 endCallback；浏览器会节流后台/高负载的定时器，这个 Promise
+  // 可能几十秒都不 resolve。而调用方（selectFile / handleRefresh）是
+  // `await renderGraph(...)` 后才把 isSwitching/isRefreshing 置回 false 的，
+  // 于是标题会一直卡在「加载中…」。
+  // 这里改为不阻塞：渲染继续进行，界面切换立刻结束。
+  void graph.render();
+
+  // 布局结束后把视图适配进画布。
+  //
+  // 为什么不能只靠构造时的 autoFit: "view"：
+  // autoFit 只在**创建实例时**生效一次；之后每次 setData 都换了一整套节点，
+  // 新坐标与视口尺寸不匹配（大图上节点跑到画布外，用户只看到一部分）。
+  //
+  // 为什么不在下面直接调 fitView：
+  // 上面刻意没有 await render()，此刻布局仍在跑。用一个「还没收敛」的
+  // 中间包围盒去算缩放，会得出错误的比例——实测出现过把图**放大**到只看得见
+  // 四五个节点的情况（fitView 用的是当时的 bounds，而节点还在向外扩散）。
+  // 所以改为监听 G6 的 afterlayout 事件：只有布局真正结束才适配，
+  // 既不用轮询猜时机，也不会被后续坐标更新打断。
+  void fitWhenLayoutSettled();
+}
+
+/**
+ * 在布局结束后把整图适配进视口。
+ *
+ * 用 G6 的 `afterlayout` 事件而不是轮询坐标：
+ * - 事件在布局真正结束时触发，此时坐标已最终确定，算出的 scale 才正确；
+ * - 不需要在页面里定时轮询，避免与后续 renderGraph 调用互相干扰。
+ *
+ * 兜底：若事件始终没来（例如节点为空、布局被 stopLayout 提前停掉），
+ * 超时后仍尝试适配一次。
+ */
+function fitWhenLayoutSettled(): void {
+  const g = graph;
+  if (!g) return;
+
+  let done = false;
+  const fit = () => {
+    if (done) return;
+    done = true;
+    fitGraph();
+  };
+
+  try {
+    (g as any).on("afterlayout", fit);
+  } catch {
+    fit();
+    return;
+  }
+
+  // 兜底：空数据 / 布局被中断时 afterlayout 可能不触发
+  setTimeout(fit, 4000);
 }
 
 async function expandNodeNeighbors(nodeId: string) {
@@ -695,8 +1205,12 @@ async function expandNodeNeighbors(nodeId: string) {
     graphRawData.edges.push(...ne);
     expandedNodes.value.add(nodeId);
     const s = buildStyledGraph({ nodes: nn, edges: ne });
+    // addData 是同步的，新节点会立刻进入模型（此后按 id 操作才安全）。
     graph.addData(s as any);
-    await graph.render();
+    // 与 renderGraph 同样的原因：不能 await render()。
+    // d3-force 动画模式要跑满 maxIteration 才 resolve，期间状态栏会一直停在
+    // 「展开…」，且异常也不会进入 catch。改为不阻塞，渲染在后台继续完成。
+    void graph.render();
     statusText.value = `已展开 ${nn.length} 节点 ${ne.length} 边`;
   } catch (e) {
     statusText.value = `展开失败：${(e as Error).message}`;
@@ -809,27 +1323,65 @@ async function handleUpload() {
   }
 }
 
+// 支持的学习资料格式。图片走后端多模态识图，其余走本地解析。
+const SUPPORTED_UPLOAD_EXTENSIONS = [
+  ".md", ".markdown", ".txt",
+  ".docx", ".pdf",
+  ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+];
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+function fileExtension(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
+/**
+ * 读取任意受支持格式的文件并转成 Markdown。
+ * Markdown/文本直接本地读取（不占网络与额度），其余交给后端转换。
+ */
+async function readFileAsMarkdown(file: File): Promise<string> {
+  const ext = fileExtension(file.name);
+  if (ext === ".md" || ext === ".markdown" || ext === ".txt" || file.type === "text/markdown") {
+    return await file.text();
+  }
+  // 传入当前用户，后端会把原件归档到该用户工作区的 original/ 目录，
+  // 之后可在 AI 工作区里下载到与上传时完全一致的原始文件。
+  const res = await extractToMarkdown(file, currentUserId());
+  return res.markdown ?? "";
+}
+
+function validateUploadFile(file: File): string {
+  const ext = fileExtension(file.name);
+  if (!SUPPORTED_UPLOAD_EXTENSIONS.includes(ext)) {
+    return `不支持 ${ext || "该"} 格式。支持：Markdown、txt、Word(.docx)、PDF、图片`;
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return `文件过大（>${MAX_UPLOAD_BYTES / 1024 / 1024}MB），请拆分后上传`;
+  }
+  return "";
+}
+
 async function handleImportMarkdownFile(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input?.files?.[0];
   if (!file) return;
-  if (!file.name.endsWith(".md") && file.type !== "text/markdown") {
-    statusText.value = "仅支持 .md 文件";
+  const invalid = validateUploadFile(file);
+  if (invalid) {
+    statusText.value = invalid;
     input.value = "";
     return;
   }
-  if (file.size > 2 * 1024 * 1024) {
-    statusText.value = "文件过大（>2MB）";
-    input.value = "";
-    return;
-  }
+  isLoading.value = true;
+  statusText.value = `正在解析：${file.name}…`;
   try {
-    markdown.value = await file.text();
+    markdown.value = await readFileAsMarkdown(file);
     importedFileName.value = file.name;
     statusText.value = `已导入：${file.name}`;
-    input.value = "";
   } catch (err) {
-    statusText.value = `读取失败：${(err as Error).message}`;
+    statusText.value = `解析失败：${(err as Error).message}`;
+  } finally {
+    isLoading.value = false;
     input.value = "";
   }
 }
@@ -855,12 +1407,26 @@ async function handleLeftUploadFileGroup(event: Event) {
     const gid = (gr as any).group_id as string;
     for (const f of Array.from(fls)) {
       statusText.value = `处理：${f.name}…`;
-      const c = await f.text();
-      await uploadNoteLangChain({
-        markdown: c,
-        user_id: currentUserId(),
-        file_group_id: gid,
-      });
+      const invalid = validateUploadFile(f);
+      if (invalid) {
+        statusText.value = `${f.name}：${invalid}`;
+        continue;
+      }
+      try {
+        // docx/pdf/图片会先在后端转成 Markdown，再进入图谱流水线
+        const c = await readFileAsMarkdown(f);
+        if (!c.trim()) {
+          statusText.value = `${f.name}：未提取到内容，已跳过`;
+          continue;
+        }
+        await uploadNoteLangChain({
+          markdown: c,
+          user_id: currentUserId(),
+          file_group_id: gid,
+        });
+      } catch (err) {
+        statusText.value = `${f.name} 解析失败：${(err as Error).message}`;
+      }
     }
     await loadFileList();
     selectedFileGroupId.value = gid;
@@ -876,47 +1442,173 @@ async function handleLeftUploadFileGroup(event: Event) {
 
 async function handlePathNavigate() {
   if (!canNavigate.value) return;
+  const target = concept.value.trim();
   isNavigating.value = true;
   statusText.value = "计算逆向学习路径…";
   try {
-    const r = await getGraphPath(concept.value.trim(), currentUserId(), maxDepth.value);
-    const hasRelated = r.all_related && r.all_related.nodes && r.all_related.nodes.length > 0;
+    const r = await getGraphPath(target, currentUserId(), maxDepth.value);
+    const relatedNodes = r.all_related?.nodes ?? [];
+    const depTree = r.dependency_tree ?? [];
+    const meta = r.meta;
+
+    // 深度被后端上限截断时如实告知，避免「设了 50 却按 12 算」的静默降级
+    if (meta?.depth_clamped) {
+      pushToast(
+        `深度已按上限 ${meta.max_depth_limit} 计算`,
+        "warn",
+        `你设置的是 ${meta.requested_depth} 层，超出当前上限（${meta.max_depth_limit} 层）后不再向外扩展。`,
+      );
+    }
+
+    // 判定「目标概念是否真的存在于图谱中」。
+    // 后端在概念不存在时会返回空壳（nodes/edges 均为空），旧逻辑会因此
+    // 回退去渲染并重排整张图谱 —— 那是与目标无关的无用排序。
+    const hasRelated = relatedNodes.length > 0;
+    const pathsWithContent = (r.paths ?? []).filter(
+      (p) => (p?.nodes?.length ?? 0) > 0 || (p?.edges?.length ?? 0) > 0,
+    );
+    const matched = hasRelated || pathsWithContent.length > 0 || depTree.length > 0;
+
+    if (!matched) {
+      // 未命中：不改变图谱布局，只给出明确反馈（toast 自动淡出，不打断操作）
+      const hint = `图谱中未找到「${target}」`;
+      statusText.value = `${hint}，请先在笔记中补充该知识点再导航`;
+      pushToast(
+        hint,
+        "warn",
+        "可能原因：笔记里还没写过这个概念，或者图谱用的是别的叫法。可先用「搜索概念…」确认确切名称。",
+        6000,
+      );
+      chatMessages.value.push({
+        role: "ai",
+        content: `### 未找到「${target}」
+
+当前知识图谱里没有「${target}」这个概念，因此无法生成逆向学习路径。
+
+可能的原因：
+- 你的笔记里还没写过这个概念（未上传相关文件或未生成图谱）
+- 用词不同：图谱用的是别的名称（例如「二叉排序树」而不是「二叉树」）
+
+建议：先用「搜索概念…」定位一下确切名称，或把相关笔记上传后重新生成图谱。`,
+      });
+      return;
+    }
+
+    // 强依赖（PREREQUISITE_OF）是真正的学习先后关系；
+    // 弱关联只是「相关」，没有先后语义，必须分开告知，避免误导。
+    const strongCount = meta?.strong_count ?? depTree.filter((n) => n.strength === "strong").length;
+    const weakCount = meta?.weak_count ?? depTree.filter((n) => n.strength === "weak").length;
+
     await renderGraph(
       hasRelated ? r.all_related! : graphRawData,
       true,
-      hasRelated ? [r.all_related!] : r.paths,
+      hasRelated ? [r.all_related!] : pathsWithContent,
       "dagre",
     );
-    if (r.dependency_tree?.length) {
+    if (depTree.length) {
       const g = await getLearningPath({
-        target_concept: concept.value.trim(),
-        dependency_tree_json: JSON.stringify(r.dependency_tree),
-        graph_nodes_json: JSON.stringify(r.all_related?.nodes ?? graphRawData.nodes),
+        target_concept: target,
+        dependency_tree_json: JSON.stringify(depTree),
+        graph_nodes_json: JSON.stringify(relatedNodes.length ? relatedNodes : graphRawData.nodes),
       }).catch(() => null);
       if (g?.guidance) {
         chatMessages.value.push({ role: "ai", content: g.guidance });
       }
     }
-    statusText.value = `专注模式：${r.paths.length} 条路径，${r.dependency_tree?.length ?? 0} 个前置节点`;
+
+    statusText.value = `专注模式：${strongCount} 个前置依赖，${weakCount} 个相关概念`;
+
+    // 结果构成提示：只有弱关联时特别说明，因为那不代表「应当先学」
+    if (strongCount === 0 && weakCount > 0) {
+      pushToast(
+        `找到 ${weakCount} 个相关概念，但没有前置依赖`,
+        "info",
+        "这些概念只是与目标「相关」（RELATED_TO / SUPPLEMENTS），不代表必须先学它们。",
+      );
+    } else if (meta?.weak_truncated) {
+      pushToast(
+        `相关概念较多，已截取前 ${weakCount} 个`,
+        "info",
+        "可减小深度以获得更聚焦的结果。",
+      );
+    }
   } catch (err) {
-    statusText.value = `路径查询失败：${(err as Error).message}`;
+    const msg = (err as Error).message;
+    statusText.value = `路径查询失败：${msg}`;
+    pushToast("路径查询失败", "error", msg, 6000);
+  } finally {
+    isNavigating.value = false;
   }
+}
+
+/**
+ * 进入专注模式（画布工具栏按钮）。
+ *
+ * 专注模式只是「打开开关」，真正的内容要等你点某个节点才会显示它以中心
+ * 的 2 层邻域。直接开开关画布毫无变化，容易被误认为按钮无效，因此这里
+ * 给出明确引导；若已有选中的概念，则直接聚焦它，省去再点一次。
+ */
+async function enterFocusMode() {
+  isFocusMode.value = true;
+  const pending = focusedNodeId.value || concept.value.trim();
+  if (pending) {
+    const exists = graphRawData.nodes.some((n) => n.id === pending);
+    if (exists) {
+      await focusNode(pending);
+      return;
+    }
+  }
+  pushToast(
+    "专注模式已开启，请点击任意节点",
+    "info",
+    "将只显示该概念周围 2 层邻居，再点其他节点可继续切换中心。",
+    6000,
+  );
+  statusText.value = "专注模式：点击任意节点查看它的邻域";
 }
 
 async function resetFocus() {
   isFocusMode.value = false;
   focusedNodeId.value = "";
+  // 两侧共用状态，退出时一并清空输入框，保持界面一致
+  concept.value = "";
   await renderGraph(graphRawData, false, [], "force");
   isNavigating.value = false;
   statusText.value = "已退出专注模式";
 }
 
 async function focusNode(nodeId: string) {
+  // 防御：nodeId 必须真实存在于当前图中。
+  // G6/graphlib 在收到不存在的 id 时会抛 "Node not found for id: xxx"，
+  // 若直接透传，用户看到的就是一条原始异常。这里提前拦截并友好提示。
+  const exists = graphRawData.nodes.some((n) => n.id === nodeId);
+  if (!exists) {
+    statusText.value = `图谱中不存在节点「${nodeId}」`;
+    pushToast(`图谱中不存在「${nodeId}」`, "warn", "该节点可能已被删除或尚未生成，请重新生成图谱。");
+    return;
+  }
+
   const focused = localFocusData(nodeId);
   isFocusMode.value = true;
   focusedNodeId.value = nodeId;
+  // 同步侧边栏输入框：专注模式与逆向导航共用状态，
+  // 不同步的话会出现「画布已聚焦 A，侧边栏还写着 B」的割裂感。
+  concept.value = nodeId;
   await renderGraph(graphRawData, true, [focused], "force");
-  await (graph as any)?.focusElement?.(nodeId, { animation: { duration: 500 } });
+
+  // 渲染完成后再次确认（筛选/聚焦可能把节点排除在外）
+  const rendered = new Set(focused.nodes.map((n) => n.id));
+  if (!rendered.has(nodeId)) {
+    statusText.value = `「${nodeId}」在当前视图范围内没有可展示的关联`;
+    return;
+  }
+
+  try {
+    await (graph as any)?.focusElement?.(nodeId, { animation: { duration: 500 } });
+  } catch (err) {
+    // 焦点动画失败不影响聚焦本身，仅记录，不打断用户
+    console.warn("focusElement failed:", err);
+  }
   statusText.value = `专注模式：${focused.nodes.length} 个相关知识点`;
 }
 
@@ -925,7 +1617,9 @@ async function searchGraph() {
   if (!keyword) return;
   const node = graphRawData.nodes.find((item) => (item.label || item.id).toLowerCase().includes(keyword));
   if (!node) {
-    statusText.value = `未找到概念「${graphSearch.value.trim()}」`;
+    const kw = graphSearch.value.trim();
+    statusText.value = `未找到概念「${kw}」`;
+    pushToast(`未找到概念「${kw}」`, "warn", "试试更短的关键词，或先上传包含该知识点的笔记。");
     return;
   }
   await focusNode(node.id);
@@ -947,8 +1641,40 @@ async function applyLayoutMode() {
   statusText.value = activeLayout.value === "dagre" ? "层级布局：前置知识从左向右排列" : "关系网络：按关联强度排列";
 }
 
-function fitGraph() {
-  void (graph as any)?.fitView?.({ when: "always", direction: "both" });
+/**
+ * 把整图适配进画布（「适应屏幕」按钮与布局结束后的自动适配共用）。
+ *
+ * 关键点：G6 的 fitView 会把 context.options.padding 当作四周留白
+ * （viewport.js 里 `const [top,right,bottom,left] = this.padding`，
+ * 然后按内缩后的区域算 scale）。默认 padding 是 0，
+ * 于是适配完内容正好顶满画布——节点和标签贴在边缘、看起来像被裁掉。
+ * 所以这里显式传入宽松的 padding。
+ *
+ * 另外：`direction: "both"` 会按 x/y 中较小的比例缩放，保证两个方向都装得下。
+ */
+function fitGraph(): void {
+  if (!graph) return;
+  const g: any = graph;
+
+  // 适配要跑两遍：布局停止后元素包围盒可能还会因为「边/标签重算」而变化一次，
+  // 只适配一遍会让最后变大的节点探出画面（实测有节点顶到画布上边缘之外）。
+  const doFit = () => {
+    if (!graph) return;
+    try {
+      const p = g.fitView?.({ when: "always", direction: "both" });
+      // padding 已在 Graph 构造项里设为 64，这里不必重复传入
+      return p && typeof p.catch === "function" ? p.catch(() => {}) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  requestAnimationFrame(() => {
+    void Promise.resolve(doFit()).then(() => {
+      // 再等一帧做第二次微调，吸收上一步之后发生的尺寸变化
+      requestAnimationFrame(() => void doFit());
+    });
+  });
 }
 
 function zoomGraph(ratio: number) {
@@ -957,19 +1683,28 @@ function zoomGraph(ratio: number) {
 
 onMounted(async () => {
   await initGraph();
+  // 恢复上次登录的用户，避免刷新后文件列表按 default_user 查询而显示为空
+  if (loggedInUserId.value) {
+    userId.value = loggedInUserId.value;
+  }
   await loadFileList({ silent: true });
+  // 恢复「全图」作用域下的历史对话，并刷新状态栏。
+  // 必须放在 fetchAllGraph() 之前：大图渲染（G6 力导向，数百节点）可能长时间不返回，
+  // 若在它之后 await，聊天历史会被一直阻塞而显示为空。
+  if (loggedInUserId.value) {
+    await loadConversation("", "");
+    statusText.value =
+      files.value.length === 0 && fileGroups.value.length === 0
+        ? `新用户「${loggedInUserId.value}」已创建，上传 MD 文件开始使用`
+        : `欢迎回来「${loggedInUserId.value}」，${files.value.length} 个文件、${fileGroups.value.length} 个文件组`;
+  }
+  // 图谱渲染失败或卡住都不应影响上面的会话恢复与状态展示
   try {
     await fetchAllGraph();
   } catch {
     statusText.value = "图谱待生成";
   }
-  if (graphRoot.value && graph) {
-    resizeObserver = new ResizeObserver((e) => {
-      const r = e[0];
-      if (r && graph) graph.resize(r.contentRect.width, r.contentRect.height);
-    });
-    resizeObserver.observe(graphRoot.value);
-  }
+  if (graphRoot.value && graph) ensureResizeObserver();
 });
 
 onBeforeUnmount(() => {
@@ -983,8 +1718,20 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="flex h-screen w-full overflow-hidden bg-[#F8FAFC]">
+
+    <!-- 自动淡出的轻提示（未命中、深度截断等） -->
+    <ToastStack :toasts="toasts" @dismiss="dismissToast" />
+    <!-- 左侧：折叠时收成图标栏 -->
+    <SidebarRail
+      v-if="leftCollapsed"
+      side="left"
+      :items="leftRailItems"
+      @select="handleLeftRailSelect"
+      @expand="expandSidebar('left')"
+    />
     <!-- 左侧：文件管理（可拖拽调宽） -->
     <FileSidebar
+      v-else
       v-model:new-group-name="newGroupName"
       v-model:menu-open="menuOpen"
       :width="leftWidth"
@@ -1006,9 +1753,20 @@ onBeforeUnmount(() => {
       @delete-group="handleDeleteGroup"
       @add-to-group="(id) => (addFileToGroupTarget = id)"
       @refresh="handleRefresh"
+      @collapse="collapseSidebar('left')"
+    />
+
+    <!-- 折叠态下仍需能上传：图标栏里的隐藏 file input -->
+    <input
+      ref="leftRailUploadInput"
+      class="hidden"
+      type="file"
+      accept=".md,.markdown,.txt,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp"
+      @change="handleLeftUploadFile"
     />
 
     <div
+      v-if="!leftCollapsed"
       class="group relative w-1.5 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-indigo-300 active:bg-indigo-400"
       @mousedown="onDividerMousedown('left', $event)"
     >
@@ -1038,7 +1796,15 @@ onBeforeUnmount(() => {
       </header>
 
       <div class="relative m-3 min-h-0 flex-1 overflow-hidden rounded-[18px] border border-gray-200 bg-white shadow-sm">
-        <div ref="graphRoot" class="absolute inset-0" />
+        <!--
+          graphRoot 只负责撑满父容器，绝不能让 G6 直接作为它的容器：
+          G6 初始化时会改写容器的 style（把 absolute 改成 relative 并设固定宽高），
+          一旦被改写，inset-0 失效，容器塌缩到内容高度，画布下方就露出白屏。
+          所以真正的画布容器是内层的 graphCanvas。
+        -->
+        <div ref="graphRoot" class="absolute inset-0">
+          <div ref="graphCanvas" class="h-full w-full" />
+        </div>
 
         <div class="absolute left-4 top-4 z-20 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white/95 p-2 shadow-sm backdrop-blur">
           <div class="flex h-9 items-center overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -1056,7 +1822,7 @@ onBeforeUnmount(() => {
             <option value="dagre">学习层级</option>
             <option value="force">关系网络</option>
           </select>
-          <button class="h-9 rounded-xl px-3 text-xs font-medium transition" :class="isFocusMode ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'" @click="isFocusMode ? resetFocus() : (isFocusMode = true)">
+          <button class="h-9 rounded-xl px-3 text-xs font-medium transition" :class="isFocusMode ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'" @click="isFocusMode ? resetFocus() : enterFocusMode()">
             {{ isFocusMode ? "退出专注" : "专注模式" }}
           </button>
           <button class="h-9 rounded-xl bg-slate-100 px-3 text-xs text-slate-600 hover:bg-slate-200" @click="fitGraph">适应屏幕</button>
@@ -1119,42 +1885,87 @@ onBeforeUnmount(() => {
       />
     </div>
 
+    <!-- 右侧：折叠时收成图标栏 -->
+    <SidebarRail
+      v-if="rightCollapsed"
+      side="right"
+      :items="rightRailItems"
+      @select="(k) => expandSidebar('right', k)"
+      @expand="expandSidebar('right')"
+    />
+
     <!-- 右侧：导入 / 导航 / 对话（可拖拽调宽） -->
     <aside
-      :style="{ width: `${rightWidth}px` }"
-      class="flex shrink-0 flex-col gap-3 overflow-hidden border-l border-gray-200 bg-[#F8FAFC] p-3"
+      v-show="!rightCollapsed"
+      ref="rightPanelEl"
+      :style="{ width: rightCollapsed ? '0px' : `${rightWidth}px` }"
+      class="relative flex shrink-0 flex-col gap-3 overflow-hidden border-l border-gray-200 bg-[#F8FAFC] p-3"
     >
-      <ImportPanel
-        v-model:markdown="markdown"
-        v-model:user-id="userId"
-        :imported-file-name="importedFileName"
-        :logged-in-user-id="loggedInUserId"
-        :is-loading="isLoading"
-        :can-generate="canGenerate"
-        @login="handleLogin"
-        @import-file="handleImportMarkdownFile"
-        @generate="handleUpload"
-      />
+      <!-- 侧栏标题行：折叠按钮 -->
+      <div class="flex shrink-0 items-center justify-between px-1">
+        <span class="text-[12px] font-medium text-slate-400">学习面板</span>
+        <button
+          type="button"
+          class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition duration-200 hover:bg-gray-200 hover:text-slate-700"
+          title="折叠侧栏"
+          @click="collapseSidebar('right')"
+        >
+          <PanelRightClose class="h-4 w-4" />
+        </button>
+      </div>
 
-      <LearningNavPanel
-        v-model:concept="concept"
-        v-model:max-depth="maxDepth"
-        :can-navigate="canNavigate"
-        :is-loading="isLoading"
-        :is-navigating="isNavigating"
-        @navigate="handlePathNavigate"
-        @reset="resetFocus"
-      />
+      <div ref="importPanelEl" class="shrink-0">
+        <ImportPanel
+          v-model:markdown="markdown"
+          v-model:user-id="userId"
+          :imported-file-name="importedFileName"
+          :logged-in-user-id="loggedInUserId"
+          :is-loading="isLoading"
+          :can-generate="canGenerate"
+          @login="handleLogin"
+          @logout="handleLogout"
+          @import-file="handleImportMarkdownFile"
+          @generate="handleUpload"
+        />
+      </div>
 
-      <AiChatPanel
-        v-model:chat-input="chatInput"
-        :messages="chatMessages"
-        :is-chatting="isChatting"
-        :has-conversation="!!currentConversationId"
-        :render-markdown="renderMarkdown"
-        @send="sendChatMessage()"
-        @clear="handleClearConversation"
-        @upload-image="handleChatImageUpload"
+      <div ref="navPanelEl" class="shrink-0">
+        <LearningNavPanel
+          v-model:concept="concept"
+          v-model:max-depth="maxDepth"
+          :max-depth-limit="MAX_PATH_DEPTH_LIMIT"
+          :can-navigate="canNavigate"
+          :is-loading="isLoading"
+          :is-navigating="isNavigating"
+          @navigate="handlePathNavigate"
+          @reset="resetFocus"
+        />
+      </div>
+
+      <!--
+        AI 学习导师需要占满剩余高度，但工作区面板展开时不能把它挤没。
+        这里用 min-h-[300px] 给聊天区一个下限：AiChatPanel 自身样式不动，
+        仍由它内部的 flex-1 负责填充。
+      -->
+      <div ref="chatPanelEl" class="flex min-h-[300px] flex-1 flex-col">
+        <AiChatPanel
+          v-model:chat-input="chatInput"
+          :messages="chatMessages"
+          :is-chatting="isChatting"
+          :has-conversation="!!currentConversationId"
+          :render-markdown="renderMarkdown"
+          @send="sendChatMessage()"
+          @clear="handleClearConversation"
+          @upload-image="handleChatImageUpload"
+        />
+      </div>
+
+      <WorkspacePanel
+        ref="workspacePanelRef"
+        :user-id="loggedInUserId"
+        :library-files="files.map((f) => ({ id: f.id, name: f.name }))"
+        @sync-file="handleSyncFileToWorkspace"
+        @notify="statusText = $event"
       />
     </aside>
 

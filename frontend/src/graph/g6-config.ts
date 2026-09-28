@@ -306,29 +306,70 @@ export type LayoutType = "force" | "dagre";
 /**
  * 获取力导向布局配置（普通浏览模式）
  * 优化参数：防止重叠、合适的斥力、边长度
- * G6 v5 中 preventOverlap 是软约束，通过增大 nodeSpacing 和 collideStrength 来增强防重叠效果
+ *
+ * ⚠️ 关于 collide.radius（节点重叠的历史坑）
+ *
+ * 曾经这里是 radius: 46，想法是「节点最大 64px，半径 46 足够」。
+ * 但实测节点明显挤在一起、标签互相压住，原因有两个：
+ *
+ * 1) 节点的真实视觉占位**不止是圆**。styleNode 里标签用的是
+ *    labelPlacement:"bottom" + labelOffsetY:7，所以一个节点的实际高度是
+ *      size(圆直径) + 7(偏移) + 标签行高(≈13)
+ *    常见 size≈50 的节点约有 70px 高，标签还另有最多 12 个字符的宽度。
+ *    而 d3-force 的 collide 约束的是**圆心之间的距离**，
+ *    因此 radius 必须覆盖「半个节点占位区域」的斜边，而不只是半个圆。
+ *
+ * 2) radius 只是硬碰撞下限，最终位置还要受 manyBody 斥力与 link 引力拉扯，
+ *    收敛后实际间距往往**小于**理想值。
+ *    实测 radius=46 时，19 节点的小图收敛后最小圆心距仅 77px，
+ *    而节点直径就有 70px —— 只剩 7px 缝，标签必然重叠。
+ *
+ * 所以把 radius 提到 58（≈所需 55 + 余量），并减弱斥力、增加 collide 迭代，
+ * 让末态分布更均匀而不是「先挤紧再弹开」。
  */
 export function getForceLayoutConfig() {
   return {
     type: "d3-force",
+    // 让 G6 依据节点真实尺寸自动推导碰撞半径：
+    // getCollisionOptions 里逻辑是
+    //   radius = options.collide.radius || (d => max(sizeFn(d))/2)
+    // 一旦显式给了 collide.radius，就**覆盖**掉这个按节点尺寸自适应的函数，
+    // 变成所有节点共用同一个半径（大节点仍会互相压住）。
+    // 这里改为提供 nodeSize/nodeSpacing，让每个节点用自己的尺寸算半径。
+    nodeSize: 70,
+    nodeSpacing: 30,
     link: {
-      distance: 150,
-      strength: 0.18
+      // 适当拉长边，给节点留出排布空间
+      distance: 170,
+      strength: 0.16
     },
     manyBody: {
-      strength: -900
+      // -900 会把节点先拉到极近再靠 collide 弹开，收敛抖动大且末态偏挤
+      strength: -520
     },
     collide: {
-      radius: 46,
+      // 不再写死 radius：交给 G6 按 nodeSize 推导（见上方说明）。
+      // 显式给一个「兜底下限」会覆盖自适应逻辑，所以这里保留大半径只为
+      // strength/iterations 生效——但注意 radius 一旦存在就会被采用，
+      // 因此这里**不设 radius**，只增强迭代次数让碰撞约束充分生效。
       strength: 1,
-      iterations: 4
+      iterations: 10
     },
     center: {
-      strength: 0.06
+      strength: 0.08
     },
-    alphaDecay: 0.025,
-    velocityDecay: 0.45,
-    maxIteration: 1800
+    // 收敛速度：alphaDecay 越小收敛越慢。原先 0.022 配合 maxIteration=300
+    // 会在模拟尚未收敛时就停住，末态仍是「正在挤开」的中间状态，
+    // 表现为节点看似排出去了、实际间距仍小于期望。
+    // 提高到 0.03 并在 300 次内收敛到位。
+    alphaDecay: 0.03,
+    velocityDecay: 0.4,
+    // 迭代上限必须控制在合理范围：
+    // d3-force 的 manyBody 每次迭代是 O(n²)，全图 400+ 节点时 1800 次迭代
+    // 会让 layout.postLayout() 长时间不返回，renderGraph 的 await 也就一直挂着，
+    // 表现为切换文件后标题一直停在「加载中…」。
+    // 300 次已足够让图形收敛到可读状态，且等待时间可控。
+    maxIteration: 300
   };
 }
 

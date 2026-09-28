@@ -14,6 +14,7 @@ const emit = defineEmits<{
   "update:markdown": [value: string];
   "update:userId": [value: string];
   login: [];
+  logout: [];
   importFile: [event: Event];
   generate: [];
 }>();
@@ -24,14 +25,14 @@ const emit = defineEmits<{
     <div class="mb-3 flex items-start justify-between gap-2">
       <div class="min-w-0">
         <h2 class="text-base font-semibold text-slate-900">导入学习笔记</h2>
-        <p class="mt-0.5 text-[13px] text-slate-500">上传 Markdown，生成图谱</p>
+        <p class="mt-0.5 text-[13px] text-slate-500">支持 Word / PDF / 图片 / Markdown</p>
       </div>
       <label
         class="inline-flex h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-sm font-medium text-slate-700 transition duration-200 hover:bg-gray-100"
       >
         <FileUp class="h-4 w-4" />
         导入
-        <input class="hidden" type="file" accept=".md,text/markdown" @change="emit('importFile', $event)" />
+        <input class="hidden" type="file" accept=".md,.markdown,.txt,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp" @change="emit('importFile', $event)" />
       </label>
     </div>
 
@@ -69,6 +70,15 @@ const emit = defineEmits<{
       </button>
     </div>
 
-    <p v-if="loggedInUserId" class="mt-2 truncate text-[13px] text-emerald-600">当前用户：{{ loggedInUserId }}</p>
+    <p v-if="loggedInUserId" class="mt-2 flex items-center gap-2 truncate text-[13px] text-emerald-600">
+      <span class="truncate">当前用户：{{ loggedInUserId }}</span>
+      <button
+        type="button"
+        class="shrink-0 text-slate-400 underline-offset-2 transition duration-200 hover:text-slate-600 hover:underline"
+        @click="emit('logout')"
+      >
+        退出
+      </button>
+    </p>
   </section>
 </template>

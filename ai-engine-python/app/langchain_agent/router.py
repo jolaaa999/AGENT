@@ -22,6 +22,7 @@ from app.langchain_agent.tools import format_graph_context, format_dependency_tr
 from app.langchain_agent.schemas import DiagnosisOutput
 from app.services.markdown_parser import split_markdown_to_chunks
 from app.core.config import settings
+from app.core.llm import build_chat_openai
 
 router = APIRouter(prefix="/api/langchain", tags=["langchain"])
 logger = logging.getLogger(__name__)
@@ -31,16 +32,7 @@ logger = logging.getLogger(__name__)
 
 def _build_chat_llm(temperature: float = 0.7):
     """构建对话用 LLM 实例（延迟导入 langchain_openai）"""
-    from langchain_openai import ChatOpenAI  # noqa: PLC0415
-    return ChatOpenAI(
-        model=settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        max_tokens=2048,
-        timeout=120,
-        max_retries=2,
-    )
+    return build_chat_openai(temperature=temperature, max_tokens=2048)
 
 
 # ==================== Pydantic 请求/响应模型 ====================
@@ -71,6 +63,7 @@ class ChatRequest(BaseModel):
     graph_nodes: str = Field(default="[]", description="图谱节点 JSON")
     graph_edges: str = Field(default="[]", description="图谱边 JSON")
     image_base64: str = Field(default="", description="图片 Base64 编码（可选，支持多模态）")
+    user_id: str = Field(default="", description="当前用户 ID（用于定位其专属工作区）")
 
 
 class ChatResponse(BaseModel):
@@ -101,11 +94,11 @@ class LearningPathResponse(BaseModel):
 # ==================== 端点实现 ====================
 
 @router.post("/diagnose", response_model=DiagnoseResponse)
-def diagnose(payload: DiagnoseRequest) -> DiagnoseResponse:
+async def diagnose(payload: DiagnoseRequest) -> DiagnoseResponse:
     """
     完整的 LangChain 诊断流水线
 
-    流程：AST切分 -> NER抽取 -> 事实校验 -> 知识补全 -> 聚合输出
+    流程：AST切分 -> NER抽取 -> 事实校验 + 知识补全（并发）-> 聚合输出
 
     返回符合 Go 后端入库格式的 nodes[] + edges[] 数组，
     包含 status（correct/error/supplement）和 reason 字段。
@@ -116,9 +109,10 @@ def diagnose(payload: DiagnoseRequest) -> DiagnoseResponse:
         raise HTTPException(status_code=400, detail="Markdown 内容为空")
 
     # Step 2: 运行 LangChain 诊断流水线
+    # 使用异步版本：NER 之后的 FactCheck 与 Supplement 并发执行，显著降低总延迟
     chain = get_diagnosis_chain()
     try:
-        result: DiagnosisResult = chain.run(
+        result: DiagnosisResult = await chain.arun(
             chunks=chunks,
             original_markdown=payload.markdown,
         )
@@ -197,6 +191,7 @@ def chat(payload: ChatRequest) -> ChatResponse:
             graph_nodes=graph_nodes,
             graph_edges=graph_edges,
             image_base64=payload.image_base64,
+            user_id=payload.user_id,
         )
     except Exception as exc:
         logger.exception("[LangChain Router] ReAct Agent 调用失败")

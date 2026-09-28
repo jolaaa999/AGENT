@@ -15,7 +15,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
 
-from app.core.config import settings
+from app.core.llm import build_chat_openai
 from app.langchain_agent.prompts import get_supplement_prompt
 from app.langchain_agent.schemas import (
     NEROutput,
@@ -28,16 +28,7 @@ logger = logging.getLogger(__name__)
 
 def _build_llm(temperature: float = 0.3) -> "ChatOpenAI":
     """知识补全需要适中的 temperature（0.3）"""
-    from langchain_openai import ChatOpenAI  # noqa: PLC0415
-    return ChatOpenAI(
-        model=settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        max_tokens=4096,
-        timeout=120,
-        max_retries=2,
-    )
+    return build_chat_openai(temperature=temperature)
 
 
 class SupplementAgent:

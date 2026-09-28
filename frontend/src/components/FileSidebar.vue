@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ChevronDown, ChevronRight, FileText, Folder, FolderPlus, MoreHorizontal, RefreshCw, Upload } from "lucide-vue-next";
+import { ChevronDown, ChevronRight, FileText, Folder, FolderPlus, MoreHorizontal, PanelLeftClose, RefreshCw, Upload } from "lucide-vue-next";
 import type { FileGroup, UserFile } from "../api/graph";
 
 const props = defineProps<{
@@ -30,6 +30,7 @@ const emit = defineEmits<{
   deleteGroup: [id: string];
   addToGroup: [fileId: string];
   refresh: [];
+  collapse: [];
 }>();
 
 const expandedGroupIds = ref<Set<string>>(new Set());
@@ -75,10 +76,19 @@ watch(
     class="flex h-full shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-white"
   >
     <div class="flex items-center justify-between border-b border-gray-200 px-4 py-3">
-      <div>
+      <div class="min-w-0">
         <h2 class="text-base font-semibold text-slate-900">文件</h2>
-        <p class="text-[13px] text-slate-500">课程笔记与文件组</p>
+        <p class="truncate text-[13px] text-slate-500">课程笔记与文件组</p>
       </div>
+      <!-- 手动折叠：折叠后变成左侧窄图标栏 -->
+      <button
+        type="button"
+        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition duration-200 hover:bg-gray-100 hover:text-slate-700"
+        title="折叠侧栏"
+        @click="emit('collapse')"
+      >
+        <PanelLeftClose class="h-4 w-4" />
+      </button>
     </div>
 
     <div class="space-y-2 border-b border-gray-100 px-3 py-3">
@@ -89,7 +99,7 @@ watch(
         >
           <Upload class="h-4 w-4" />
           上传
-          <input class="hidden" type="file" accept=".md,text/markdown" @change="emit('uploadFile', $event)" />
+          <input class="hidden" type="file" accept=".md,.markdown,.txt,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp" @change="emit('uploadFile', $event)" />
         </label>
         <button
           v-else
@@ -110,7 +120,7 @@ watch(
           <input
             class="hidden"
             type="file"
-            accept=".md,text/markdown"
+            accept=".md,.markdown,.txt,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp"
             multiple
             @change="emit('uploadFileGroup', $event)"
           />

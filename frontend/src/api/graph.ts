@@ -39,6 +39,26 @@ export interface DependencyNode {
   depth: number;
   status?: string;
   reason?: string;
+  /**
+   * 依赖强度：
+   * - "strong" = 沿 PREREQUISITE_OF 得到，是真正的学习前置依赖，先后顺序可信
+   * - "weak"   = 仅靠 RELATED_TO / SUPPLEMENTS 等关联边找到，只是「相关」
+   */
+  strength?: "strong" | "weak";
+  /** 命中所用的关系类型 */
+  via?: string;
+}
+
+/** 路径查询的执行元信息（深度是否截断、强/弱关联各多少） */
+export interface PathQueryMeta {
+  requested_depth: number;
+  applied_depth: number;
+  depth_clamped: boolean;
+  max_depth_limit: number;
+  strong_count: number;
+  weak_count: number;
+  related_count: number;
+  weak_truncated: boolean;
 }
 
 export interface PathResponse {
@@ -46,6 +66,7 @@ export interface PathResponse {
   paths: GraphResponse[];
   dependency_tree?: DependencyNode[];
   all_related?: GraphResponse;
+  meta?: PathQueryMeta;
 }
 
 export interface ExplainPayload {
@@ -176,6 +197,55 @@ export function listUserFiles(userId?: string) {
   return request<{ files: UserFile[]; file_groups: FileGroup[] }>(`/files${query}`);
 }
 
+/**
+ * 取回文件或整个文件组的 Markdown 正文。
+ * 文件组对话需要它来聚合组内全部笔记作为 AI 上下文。
+ */
+export function getFilesMarkdown(params: { file_id?: string; file_group_id?: string; user_id?: string }) {
+  const qs = new URLSearchParams();
+  if (params.file_id) qs.set("file_id", params.file_id);
+  if (params.file_group_id) qs.set("file_group_id", params.file_group_id);
+  if (params.user_id) qs.set("user_id", params.user_id);
+  return request<{ markdown: string; length: number }>(`/files/markdown?${qs.toString()}`);
+}
+
+/**
+ * 把 docx / pdf / 图片 等文件上传给后端，转成 Markdown 文本。
+ * 注意：这是 multipart/form-data，不能复用 JSON 的 request()（它会强制覆盖 Content-Type）。
+ */
+export async function extractToMarkdown(
+  file: File,
+  userId?: string,
+): Promise<{ markdown: string; source_type: string; filename: string; original_name?: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  // 必须带上 user_id：后端要把原件存到该用户工作区的 original/ 目录下。
+  // 不带的话会落到 default_user，用户就下载不到自己的原件了。
+  if (userId) form.append("user_id", userId);
+  const response = await fetch(`${API_BASE}/files/extract`, { method: "POST", body: form });
+  const text = await response.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { error: text };
+  }
+  if (!response.ok) {
+    throw new Error(data.error || data.detail || `转换失败（HTTP ${response.status}）`);
+  }
+  return data;
+}
+
+/**
+ * 把修改后的正文保存到指定文件节点（AI 编辑后落盘用）。
+ */
+export function updateFileContent(fileId: string, content: string, userId?: string) {
+  return request<{ status: string }>("/files/content", {
+    method: "PUT",
+    body: JSON.stringify({ file_id: fileId, content, user_id: userId }),
+  });
+}
+
 export function createFile(name: string, fileGroupId?: string, userId?: string) {
   return request<{ file_id: string; name: string }>("/files/create", {
     method: "POST",
@@ -290,4 +360,53 @@ export function getLearningPath(payload: LearningPathRequest) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+// ==================== AI 工作区（沙箱文件） ====================
+
+export interface WorkspaceFile {
+  name: string;
+  size: number;
+  mod_time: string;
+  /** 是否为上传的原件（存于 original/ 子目录，字节级等于用户上传的文件） */
+  is_original?: boolean;
+  /** 展示类型：md / word / pdf / image / other */
+  kind?: string;
+}
+
+export function listWorkspaceFiles(userId?: string) {
+  return request<{ user_id: string; files: WorkspaceFile[] }>(
+    `/workspace/files?user_id=${encodeURIComponent(userId ?? "")}`,
+  );
+}
+
+export function readWorkspaceFile(path: string, userId?: string) {
+  return request<{ path: string; content: string; length: number }>(
+    `/workspace/file?path=${encodeURIComponent(path)}&user_id=${encodeURIComponent(userId ?? "")}`,
+  );
+}
+
+export function writeWorkspaceFile(path: string, content: string, userId?: string) {
+  return request<{ status: string; path: string }>("/workspace/file", {
+    method: "PUT",
+    body: JSON.stringify({ path, content, user_id: userId ?? "" }),
+  });
+}
+
+/** 把某个已入库文件同步进工作区，返回工作区内的相对路径 */
+export function syncFileToWorkspace(fileId: string, userId?: string) {
+  return request<{ status: string; path: string }>("/files/sync-workspace", {
+    method: "POST",
+    body: JSON.stringify({ file_id: fileId, user_id: userId ?? "" }),
+  });
+}
+
+/** 生成工作区文件的下载地址（浏览器直接访问以下载） */
+export function workspaceDownloadUrl(path: string, userId?: string) {
+  return `${API_BASE}/files/download?path=${encodeURIComponent(path)}&user_id=${encodeURIComponent(userId ?? "")}`;
+}
+
+/** 生成原始上传文件的下载地址 */
+export function originalDownloadUrl(name: string, userId?: string) {
+  return `${API_BASE}/files/download-original?name=${encodeURIComponent(name)}&user_id=${encodeURIComponent(userId ?? "")}`;
 }

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api.parse import router as parse_router
+from app.api.extract import router as extract_router
 from app.langchain_agent import langchain_router
 from app.core.config import settings
 
@@ -10,6 +11,7 @@ app = FastAPI(
     version="0.3.0",
 )
 app.include_router(parse_router)
+app.include_router(extract_router)
 app.include_router(langchain_router)
 
 

@@ -5,6 +5,12 @@ from app.langchain_agent.tools.agent_tools import (
     set_document,
     pop_edited_markdown,
 )
+from app.langchain_agent.tools.workspace_tools import (
+    get_workspace_tools,
+    set_workspace_user,
+    get_workspace_user,
+    set_active_conversation,
+)
 
 __all__ = [
     "format_graph_context",
@@ -12,4 +18,8 @@ __all__ = [
     "get_agent_tools",
     "set_document",
     "pop_edited_markdown",
+    "get_workspace_tools",
+    "set_workspace_user",
+    "get_workspace_user",
+    "set_active_conversation",
 ]

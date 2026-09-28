@@ -8,3 +8,9 @@ langchain
 langchain-core
 langchain-openai
 langgraph
+
+# 文件上传转换（docx / pdf / 图片 → Markdown）
+python-docx
+pypdf
+pillow
+python-multipart

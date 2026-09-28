@@ -6,6 +6,7 @@ from openai import OpenAI
 from pydantic import ValidationError
 
 from app.core.config import settings
+from app.core.llm import THINKING_DISABLED
 from app.schemas.graph import GraphEdge
 
 SYSTEM_PROMPT = """
@@ -105,6 +106,7 @@ def parse_relations_with_retry(chunks: list[str], max_retries: int = 2) -> tuple
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.2,
+                extra_body=THINKING_DISABLED,
             )
             content = completion.choices[0].message.content or ""
             if not content.strip():
@@ -144,6 +146,7 @@ def explain_concept(concept: str, markdown: str) -> str:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
+            extra_body=THINKING_DISABLED,
         )
     except Exception as exc:  # noqa: BLE001 - provider/network errors
         raise DeepSeekParseError(f"deepseek explain request failed: {exc}") from exc

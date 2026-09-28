@@ -16,7 +16,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from langchain_openai import ChatOpenAI
 
-from app.core.config import settings
+from app.core.llm import build_chat_openai
 from app.langchain_agent.prompts import get_ner_prompt
 from app.langchain_agent.schemas import (
     NEROutput,
@@ -29,23 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 def _build_llm(temperature: float = 0.2) -> "ChatOpenAI":
-    # 延迟导入，确保未安装 langchain 时 schema/tools 层仍可正常使用
-    from langchain_openai import ChatOpenAI  # noqa: PLC0415
-    """
-    构建 LangChain ChatOpenAI 实例（兼容 DeepSeek API）。
-
-    DeepSeek API 与 OpenAI SDK 完全兼容，因此使用 langchain-openai 的
-    ChatOpenAI 类，通过 base_url 指向 DeepSeek 端点。
-    """
-    return ChatOpenAI(
-        model=settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=temperature,
-        max_tokens=4096,
-        timeout=120,
-        max_retries=2,
-    )
+    """构建 LangChain ChatOpenAI 实例（兼容 DeepSeek API）。"""
+    return build_chat_openai(temperature=temperature)
 
 
 class NERAgent:

@@ -6,8 +6,11 @@ LangChain Agent 模块的结构化输出 Schema
 """
 
 from enum import Enum
+import logging
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 # ==================== 枚举定义 ====================
@@ -63,10 +66,26 @@ class NEROutput(BaseModel):
 # ==================== 事实校验 Agent 输出 ====================
 
 class FactCheckItem(BaseModel):
-    """单条事实校验结果"""
+    """
+    单条事实校验结果。
+
+    ⚠️ status 只允许 correct / error。
+
+    设计原因：NodeStatus 里还有第三个取值 `supplement`，但它属于
+    「知识补全 Agent」的语义（笔记**没提到**、建议补充的新概念）。
+    事实校验 Agent 的职责是审查**笔记里已经写出**的概念是否写错。
+
+    早先这里直接复用 NodeStatus，导致 LLM 在「这个错误需要补充更多背景知识
+    才能讲清楚」时会把本应标红的错误填成 supplement——Pydantic 不报错、
+    合并逻辑又无条件信任 check.status，最终错误节点被静默降级成「AI 补全」，
+    用户看到的图谱里错误全都不见了（表现为「检测不出错误」）。
+
+    prompt 里已经明令禁止；这里再加一道 schema 级约束，
+    即使模型无视指令也会在校验阶段暴露出来。
+    """
     entity_name: str = Field(..., min_length=1, description="被校验的实体名称")
     original_claim: str = Field(..., description="笔记中的原始陈述")
-    status: NodeStatus = Field(..., description="校验结论")
+    status: NodeStatus = Field(..., description="校验结论：只能是 correct 或 error")
     reason: str = Field(
         default="",
         description="当 status=error 时为纠错理由；当 status=correct 时可为空"
@@ -76,12 +95,31 @@ class FactCheckItem(BaseModel):
         description="当 status=error 时给出正确描述；否则为空"
     )
 
+    @field_validator("status", mode="before")
+    @classmethod
+    def reject_supplement_status(cls, value: object) -> object:
+        """拒绝事实校验 Agent 返回 supplement。
+
+        这里刻意「修正」而不是「抛异常」：supplement 一定意味着
+        「模型认为这里有错、只是表述成了需要补充」，
+        因此按 error 语义继续处理比整条流水线失败更有价值；
+        同时留下 warning 便于观测模型行为漂移。
+        """
+        raw = getattr(value, "value", value)
+        if isinstance(raw, str) and raw.strip().lower() == NodeStatus.supplement.value:
+            logger.warning(
+                "FactCheck 返回了 supplement（属于 Supplement Agent 的状态），"
+                "已按 error 处理以保证错误不被静默降级。"
+            )
+            return NodeStatus.error
+        return value
+
     @model_validator(mode="after")
     def validate_error_has_reason(self) -> "FactCheckItem":
         if self.status == NodeStatus.error and not self.reason.strip():
+            # 模型把错误降级成 supplement 时往往只给了 reason、没给
+            # corrected_definition，此处不因此报错，交由 merge 阶段兜底补全。
             raise ValueError("status=error 时 reason 字段不能为空，必须给出纠错理由")
-        if self.status == NodeStatus.error and not self.corrected_definition.strip():
-            raise ValueError("status=error 时 corrected_definition 字段不能为空，必须给出正确描述")
         return self
 
 

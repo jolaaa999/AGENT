@@ -143,13 +143,35 @@ type DependencyNode struct {
 	Depth  int    `json:"depth"`  // 距离目标概念的跳数
 	Status string `json:"status,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Strength 标识这条依赖的强度：
+	//   "strong" = 沿 PREREQUISITE_OF 得到，是真正的学习前置依赖，先后顺序可信
+	//   "weak"   = 仅靠 RELATED_TO / SUPPLEMENTS 等关联边兜底找到，只是「相关」，
+	//              不代表应当先学它，前端需要分开呈现避免误导
+	Strength string `json:"strength,omitempty"`
+	// Via 记录命中所用的关系类型，便于在界面上解释「为什么它会被找到」
+	Via string `json:"via,omitempty"`
 }
 
 type PathResponse struct {
-	Concept        string           `json:"concept"`
+	Concept        string            `json:"concept"`
 	Paths          []G6GraphResponse `json:"paths"`
 	DependencyTree []DependencyNode  `json:"dependency_tree,omitempty"` // 逆向技能树
 	AllRelated     *G6GraphResponse  `json:"all_related,omitempty"`     // 所有相关节点（用于专注模式）
+	// Meta 描述本次查询的执行情况（深度是否被截断、强/弱关联各多少），
+	// 供前端如实告知用户，避免「设了 50 却按 12 算」这种静默降级。
+	Meta *PathQueryMeta `json:"meta,omitempty"`
+}
+
+// PathQueryMeta 路径查询的执行元信息。
+type PathQueryMeta struct {
+	RequestedDepth int  `json:"requested_depth"` // 用户请求的深度
+	AppliedDepth   int  `json:"applied_depth"`   // 实际生效的深度
+	DepthClamped   bool `json:"depth_clamped"`   // 是否因为上限被截断
+	MaxDepthLimit  int  `json:"max_depth_limit"` // 当前上限值
+	StrongCount    int  `json:"strong_count"`    // 强依赖（PREREQUISITE_OF）节点数
+	WeakCount      int  `json:"weak_count"`      // 弱关联兜底节点数
+	RelatedCount   int  `json:"related_count"`   // 直接关联节点数
+	WeakTruncated  bool `json:"weak_truncated"`  // 弱关联是否因数量上限被裁剪
 }
 
 // ==================== 讲解模型 ====================
@@ -174,6 +196,9 @@ type ChatRequest struct {
 	GraphNodes     string `json:"graph_nodes"`
 	GraphEdges     string `json:"graph_edges"`
 	ImageBase64    string `json:"image_base64"`
+	// UserID 由网关按登录态注入，用于定位该用户的 AI 工作区（沙箱）；
+	// 不接受前端指定，避免越权访问他人工作区。
+	UserID string `json:"user_id"`
 }
 
 type ChatResponse struct {

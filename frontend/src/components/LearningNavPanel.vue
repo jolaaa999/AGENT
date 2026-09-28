@@ -7,6 +7,8 @@ defineProps<{
   canNavigate: boolean;
   isLoading: boolean;
   isNavigating: boolean;
+  /** 深度上限，与后端保持一致（超出会在界面提示已按上限计算） */
+  maxDepthLimit?: number;
 }>();
 
 const emit = defineEmits<{
@@ -36,9 +38,9 @@ const emit = defineEmits<{
         :value="maxDepth"
         type="number"
         min="1"
-        max="6"
+        :max="maxDepthLimit ?? 12"
         class="h-11 w-14 shrink-0 rounded-xl border border-gray-200 px-1 text-center text-sm outline-none transition duration-200 focus:border-indigo-500"
-        title="最大深度"
+        :title="`最大深度（1-${maxDepthLimit ?? 12}）：越大越可能跨越到远处概念`"
         @input="emit('update:maxDepth', Number(($event.target as HTMLInputElement).value) || 1)"
       />
     </div>

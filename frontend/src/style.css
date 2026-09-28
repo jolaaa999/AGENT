@@ -42,3 +42,20 @@ body {
   padding: 0.1em 0.35em;
   font-size: 0.92em;
 }
+
+/* ===== KaTeX 公式（AI 学习导师回复中的 $...$ / $$...$$） ===== */
+.markdown-body .katex {
+  font-size: 1.02em;
+}
+
+/* 块级公式在窄气泡内允许横向滚动，避免撑破布局 */
+.markdown-body .katex-display {
+  margin: 0.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.15em;
+}
+
+.markdown-body .katex-display > .katex {
+  white-space: normal;
+}

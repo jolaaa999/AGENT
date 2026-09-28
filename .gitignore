@@ -21,6 +21,14 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# 误提交的前端编译产物：这些 .js 是 .vue/.ts 源码的副本，
+# 且 Vite 解析时优先命中 .js，会让源码改动「看起来没生效」。
+# 根因是 tsconfig.app.json 缺失 noEmit（已补上），若再次出现请直接删除。
+frontend/src/**/*.vue.js
+frontend/src/api/*.js
+frontend/src/graph/*.js
+frontend/src/main.js
+
 # =========================
 # 3. 后端业务层 (Go)
 # =========================
@@ -190,3 +198,6 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# AI 工作区（用户上传与 AI 修改的文件，属运行期数据）
+backend-go/workspaces/

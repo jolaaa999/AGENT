@@ -8,42 +8,102 @@ ReAct Agent 工具集
 3. 分析图像内容（多模态）
 """
 
+import contextvars
 import json
 import logging
+import threading
+from collections import OrderedDict
 from typing import Optional
 
 from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
+# ==================== 活跃会话（服务端状态） ====================
+#
+# 工具签名里的 conversation_id 依赖 LLM 原样回填，既不可靠（模型经常省略），
+# 也会在「图文混合」消息下丢失。这里维护服务端记录的活跃会话作为兜底。
+#
+# 用 contextvars 而非模块级变量：FastAPI 对同步端点使用线程池，
+# 多个用户可能同时对话；全局变量会被并发请求互相覆盖，
+# 导致 A 的请求读到 B 的会话/工作区（跨用户串号）。
+_active_conversation_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "agent_active_conversation_id", default=""
+)
+
+
+def set_active_conversation(conversation_id: str) -> None:
+    """标记当前正在处理的会话（由 ReactChatAgent 在 invoke 前调用）。
+
+    同时同步给工作区工具，保证两组工具看到同一个会话上下文。
+    """
+    _active_conversation_id.set(conversation_id or "")
+    try:
+        from app.langchain_agent.tools.workspace_tools import set_active_conversation as _set_ws
+        _set_ws(conversation_id or "")
+    except Exception:  # noqa: BLE001 - 同步失败不影响主流程
+        pass
+
+
+def current_conversation_id(explicit: str = "") -> str:
+    """显式传入优先，否则回退到服务端记录的活跃会话。"""
+    return explicit or _active_conversation_id.get()
+
+
 # ==================== 文档编辑工具 ====================
 
-# 全局文档存储（每个会话一份）
-_doc_store: dict[str, dict] = {}
+# 会话文档存储（每个会话一份）。
+#
+# 注意：这里用带容量上限的 OrderedDict 做 LRU。
+# 原实现是普通 dict 且**从不淘汰**——每个会话都会把整份 Markdown 正文
+# （实测 20KB 级）留在内存里，服务长期运行后条目与内存无界增长。
+_doc_store: "OrderedDict[str, dict]" = OrderedDict()
+_doc_lock = threading.Lock()
+_MAX_DOC_ENTRIES = 500
+
+
+def _touch_doc(key: str) -> None:
+    """把命中的会话移到 LRU 队尾（需在持有 _doc_lock 时调用）。"""
+    _doc_store.move_to_end(key)
+    while len(_doc_store) > _MAX_DOC_ENTRIES:
+        _doc_store.popitem(last=False)
 
 
 def set_document(conversation_id: str, markdown: str, graph_nodes: list[dict], graph_edges: list[dict]) -> None:
     """注册当前会话的文档和图谱数据"""
-    _doc_store[conversation_id] = {
-        "markdown": markdown,
-        "graph_nodes": graph_nodes,
-        "graph_edges": graph_edges,
-        "edited": False,
-    }
+    key = current_conversation_id(conversation_id)
+    with _doc_lock:
+        _doc_store[key] = {
+            "markdown": markdown,
+            "graph_nodes": graph_nodes,
+            "graph_edges": graph_edges,
+            "edited": False,
+        }
+        _touch_doc(key)
 
 
 def get_document(conversation_id: str) -> Optional[dict]:
     """获取当前会话的文档数据"""
-    return _doc_store.get(conversation_id)
+    key = current_conversation_id(conversation_id)
+    with _doc_lock:
+        doc = _doc_store.get(key)
+        if doc is not None:
+            _touch_doc(key)
+        return doc
 
 
 def pop_edited_markdown(conversation_id: str) -> Optional[str]:
     """获取被编辑后的 markdown 并清除编辑标记"""
-    doc = _doc_store.get(conversation_id)
-    if doc and doc.get("edited"):
-        doc["edited"] = False
-        return doc["markdown"]
-    return None
+    key = current_conversation_id(conversation_id)
+    with _doc_lock:
+        doc = _doc_store.get(key)
+        if not doc:
+            return None
+        _touch_doc(key)
+        if doc.get("edited"):
+            doc["edited"] = False
+            return doc["markdown"]
+        return None
 
 
 # ==================== LangChain Tools ====================
@@ -51,15 +111,20 @@ def pop_edited_markdown(conversation_id: str) -> Optional[str]:
 @tool
 def read_current_markdown(conversation_id: str = "") -> str:
     """
-    读取当前正在编辑的 Markdown 笔记全文。
+    读取「界面上当前打开的那一份」Markdown 笔记全文。
 
-    当你需要查看学生的笔记内容以理解上下文、发现错误、或准备修改时，
-    必须先调用此工具获取最新文档内容。
+    适用范围有限，只在下面两种情况使用：
+    - 学生明确说「这篇笔记 / 当前文档 / 我屏幕上这份」
+    - 会话里确实装载了文档（本工具能返回内容）
+
+    如果任务是「处理我的文件」「批量修改」「改完要下载」，请改用工作区工具
+    workspace_list_files / workspace_read_file / workspace_write_file。
+    本工具读不到工作区里的文件，用错会得到「当前没有打开的文档」。
 
     Args:
         conversation_id: 会话ID（系统自动填入，无需手动传递）
     """
-    doc = _doc_store.get(conversation_id)
+    doc = _doc_store.get(current_conversation_id(conversation_id))
     if not doc:
         return "（当前没有打开的文档。请先上传一份 Markdown 笔记。）"
     md = doc.get("markdown", "")
@@ -91,7 +156,7 @@ def edit_markdown(
     Returns:
         操作结果描述
     """
-    doc = _doc_store.get(conversation_id)
+    doc = _doc_store.get(current_conversation_id(conversation_id))
     if not doc:
         return "错误：当前没有打开的文档，无法编辑。"
 
@@ -137,7 +202,7 @@ def search_knowledge_graph(
     Returns:
         匹配到的概念及其关系信息（JSON 格式）
     """
-    doc = _doc_store.get(conversation_id)
+    doc = _doc_store.get(current_conversation_id(conversation_id))
     if not doc:
         return "（当前没有可用的知识图谱。）"
 
@@ -218,7 +283,7 @@ def append_markdown_section(
     Returns:
         操作结果描述
     """
-    doc = _doc_store.get(conversation_id)
+    doc = _doc_store.get(current_conversation_id(conversation_id))
     if not doc:
         return "错误：当前没有打开的文档。"
 

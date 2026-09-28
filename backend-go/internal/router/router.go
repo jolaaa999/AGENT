@@ -45,12 +45,26 @@ func New(cfg config.Config, graphController *controller.GraphController) *gin.En
 
 	// 文件管理
 	r.GET("/files", graphController.ListUserFiles)
+	r.GET("/files/markdown", graphController.GetFilesMarkdown)
+	r.POST("/files/extract", graphController.ExtractToMarkdown)
+	r.PUT("/files/content", graphController.UpdateFileContent)
 	r.POST("/files/create", graphController.CreateFile)
 	r.POST("/files/group/create", graphController.CreateFileGroup)
 	r.DELETE("/files/delete", graphController.DeleteFile)
 	r.PUT("/files/rename", graphController.RenameFile)
 	r.PUT("/files/group/rename", graphController.RenameFileGroup)
 	r.POST("/files/add-to-group", graphController.AddFileToGroup)
+	r.POST("/files/sync-workspace", graphController.SyncFileToWorkspace)
+	r.GET("/files/download", graphController.DownloadWorkspaceFile)
+	r.GET("/files/download-original", graphController.DownloadOriginalFile)
+
+	// 用户工作区（AI 文件沙箱）
+	r.GET("/workspace/files", graphController.WorkspaceList)
+	r.GET("/workspace/file", graphController.WorkspaceRead)
+	r.PUT("/workspace/file", graphController.WorkspaceWrite)
+	r.GET("/workspace/search", graphController.WorkspaceSearch)
+	r.PUT("/workspace/rename", graphController.WorkspaceRename)
+	r.DELETE("/workspace/file", graphController.WorkspaceDelete)
 	r.PUT("/files/pin", graphController.TogglePinFile)
 	r.PUT("/files/group/pin", graphController.TogglePinFileGroup)
 	r.DELETE("/files/group/delete", graphController.DeleteFileGroup)

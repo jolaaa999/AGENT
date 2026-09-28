@@ -13,6 +13,8 @@ type Config struct {
 	PythonServiceURL string
 	PythonTimeoutSec int
 	DefaultUserID    string
+	// WorkspaceRoot 是「AI 工作区」的根目录，其下按 user_id 分目录隔离。
+	WorkspaceRoot string
 }
 
 func Load() Config {
@@ -24,6 +26,7 @@ func Load() Config {
 		PythonServiceURL: getEnv("PYTHON_SERVICE_URL", "http://localhost:8000"),
 		PythonTimeoutSec: getEnvAsInt("PYTHON_PARSE_TIMEOUT_SECONDS", 120),
 		DefaultUserID:    getEnv("DEFAULT_USER_ID", "default_user"),
+		WorkspaceRoot:    getEnv("WORKSPACE_ROOT", "workspaces"),
 	}
 }
 
